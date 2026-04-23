@@ -1,0 +1,53 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+.python-version
+uv.lock
+
+# Local experiment logs and text notes
+*.txt
+*_log
+eval_logs/
+wandb/
+
+# Data
+data/
+*.fa
+*.fasta
+*.fa.gz
+*.fasta.gz
+*.gtf
+*.gtf.gz
+*.gff
+*.gff3
+*.gff.gz
+*.gff3.gz
+
+# Model outputs / checkpoints
+bidir_dnagpt/
+mntp_dnagpt*/
+contrastive_dnagpt*/
+contrastive_nt*/
+dnagpt_3b_m/
+DNAGPT/
+checkpoints/
+checkpoint-*/
+model.safetensors
+*.safetensors
+*.pt
+*.pth
+*.bin
+adapter_model.safetensors
+optimizer.pt
+scheduler.pt
+trainer_state.json
+training_args.bin
+
+# Evaluation outputs
+eval_results/
+*.json
+
+# Large local documents / generated artifacts
+*.docx
+*.pdf
