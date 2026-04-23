@@ -10,6 +10,9 @@ uv.lock
 *_log
 eval_logs/
 wandb/
+*.err
+*.out
+*.slurm
 
 # Data
 data/
