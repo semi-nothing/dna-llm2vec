@@ -8,6 +8,7 @@ uv.lock
 # Local experiment logs and text notes
 *.txt
 *_log
+*.log
 eval_logs/
 wandb/
 *.err
