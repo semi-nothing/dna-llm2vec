@@ -345,7 +345,7 @@ def train_one_task(
 ) -> dict:
     """
     Fine-tune a fresh full backbone copy of base_model on one task.
-    Returns {"accuracy": float, "f1": float, "mcc": float}.
+    Returns best-dev metrics selected by the configured early-stop monitor.
     """
     from sklearn.preprocessing import LabelEncoder
     from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef
@@ -396,8 +396,12 @@ def train_one_task(
         warmup = max(1, int(total_steps * args.warmup_ratio))
     scheduler   = get_cosine_schedule_with_warmup(optimizer, warmup, total_steps)
 
+    monitor_name = args.monitor
     best_metric = -float("inf")
-    best_preds  = None
+    best_preds = None
+    best_epoch = 0
+    epochs_without_improvement = 0
+    best_state = None
 
     for epoch in range(args.epochs):
         # ── train ──────────────────────────────────────────────────────────
@@ -433,21 +437,41 @@ def train_one_task(
                 all_preds.extend(preds.cpu().tolist())
                 all_labels.extend(labels.cpu().tolist())
 
-        f1  = f1_score(all_labels, all_preds, average="macro")
-        # Use F1 as the primary tracking metric for all tasks
-        # (accuracy for GB/NT will be computed at the end from best_preds)
-        if f1 > best_metric:
-            best_metric = f1
-            best_preds  = list(all_preds)
+        acc = float(accuracy_score(all_labels, all_preds))
+        f1 = float(f1_score(all_labels, all_preds, average="macro"))
+        mcc = float(matthews_corrcoef(all_labels, all_preds))
+        metrics = {"accuracy": acc, "f1": f1, "mcc": mcc}
+        monitor_val = metrics[monitor_name]
 
-        primary = "F1" if source in ("gue", "gue+") else "acc"
-        pval    = f1 if source in ("gue", "gue+") else accuracy_score(all_labels, all_preds)
+        improved = monitor_val > (best_metric + args.min_delta)
+        if improved:
+            best_metric = monitor_val
+            best_preds = list(all_preds)
+            best_epoch = epoch + 1
+            epochs_without_improvement = 0
+            best_state = {
+                k: v.detach().cpu().clone()
+                for k, v in classifier.state_dict().items()
+            }
+        else:
+            epochs_without_improvement += 1
+
         print(f"    epoch {epoch+1:02d}/{args.epochs}  "
-              f"loss={avg_loss:.4f}  {primary}={pval*100:.2f}%")
+              f"loss={avg_loss:.4f}  acc={acc*100:.2f}%  F1={f1*100:.2f}%  "
+              f"MCC={mcc*100:.2f}%  [monitor={monitor_name}:{monitor_val*100:.2f}%]"
+              + ("  *best" if improved else ""))
 
-    # ── final metrics from best checkpoint (best F1 epoch) ─────────────
+        if args.patience > 0 and epochs_without_improvement >= args.patience:
+            print(f"    early stop at epoch {epoch+1:02d}  "
+                  f"(best {monitor_name} at epoch {best_epoch:02d})")
+            break
+
+    if best_state is not None:
+        classifier.load_state_dict(best_state)
+
+    # Final reported metrics come from the best dev epoch, not the last epoch.
     acc = float(accuracy_score(all_labels, best_preds))
-    f1  = float(f1_score(all_labels, best_preds, average="macro"))
+    f1 = float(f1_score(all_labels, best_preds, average="macro"))
     mcc = float(matthews_corrcoef(all_labels, best_preds))
 
     # Cleanup VRAM
@@ -455,7 +479,14 @@ def train_one_task(
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    return {"accuracy": acc, "f1": f1, "mcc": mcc}
+    return {
+        "accuracy": acc,
+        "f1": f1,
+        "mcc": mcc,
+        "best_epoch": int(best_epoch),
+        "best_monitor": monitor_name,
+        "best_monitor_value": float(best_metric),
+    }
 
 
 # ── Model loader ──────────────────────────────────────────────────────────────
@@ -543,6 +574,12 @@ def parse_args():
     p.add_argument("--grad-clip",    type=float, default=1.0)
     p.add_argument("--grad-ckpt",    action="store_true",
                    help="Enable gradient checkpointing to reduce activation memory.")
+    p.add_argument("--patience",     type=int, default=0,
+                   help="Early stopping patience in epochs. 0 disables early stopping.")
+    p.add_argument("--monitor",      choices=("f1", "mcc", "accuracy"), default="mcc",
+                   help="Validation metric used for best-model selection and early stopping.")
+    p.add_argument("--min-delta",    type=float, default=0.0,
+                   help="Minimum improvement required to reset early stopping.")
     p.add_argument("--seed",         type=int, default=42,
                    help="Random seed (default: 42)")
     p.add_argument("--run-name",     default=None,
@@ -622,6 +659,7 @@ def main():
     print(f"  Tasks      : {gb_n} GB  +  {nt_n} NT  +  {gue_n} GUE  +  {guep_n} GUE+ EPI  =  {len(active)} total")
     print(f"  Models     : {[s.name for s in specs]}")
     print(f"  Epochs     : {args.epochs}  |  LR: {args.lr}  |  warmup_steps={args.warmup_steps}")
+    print(f"  Early stop : patience={args.patience}  |  monitor={args.monitor}  |  min_delta={args.min_delta}")
     print(f"  Max length : {args.max_length}")
     print(f"  Seed       : {args.seed}")
     if args.repeat_index is not None:
@@ -652,6 +690,9 @@ def main():
                     "epochs":     args.epochs,
                     "lr":         args.lr,
                     "max_length": args.max_length,
+                    "patience":   args.patience,
+                    "monitor":    args.monitor,
+                    "min_delta":  args.min_delta,
                     "seed":       args.seed,
                     "repeat_index": args.repeat_index,
                     "gb_tasks":   gb_n,
