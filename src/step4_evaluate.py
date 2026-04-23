@@ -636,6 +636,8 @@ def parse_args():
 def main():
     args  = parse_args()
     specs = [ModelSpec.parse(s) for s in args.models]
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     # Populate EPI subdir map from args (or keep defaults)
     global _epi_subdir_map
@@ -675,6 +677,9 @@ def main():
     print(f"  Models     : {[s.name for s in specs]}")
     print(f"  Max length : {args.max_length}")
     print(f"  Pooling    : {args.pooling}")
+    print(f"  Seed       : {args.seed}")
+    if args.repeat_index is not None:
+        print(f"  Repeat     : {args.repeat_index}")
     print("=" * 68)
 
     # ── W&B ───────────────────────────────────────────────────────────────────
@@ -683,13 +688,25 @@ def main():
         os.environ["WANDB_ENTITY"]  = "liangyuan-edin-queen-mary-university-of-london"
         try:
             import wandb
+            model_label = "_".join(s.name for s in specs)
+            suite_label = (
+                "gb" if args.gb_only else
+                "nt" if args.nt_only else
+                "gue" if args.gue_only else
+                "gueplus" if args.gue_plus_only else
+                "all"
+            )
+            repeat_suffix = f"_r{args.repeat_index}" if args.repeat_index is not None else ""
+            run_name = args.run_name or f"step4_{suite_label}_{model_label}_{args.pooling}_s{args.seed}{repeat_suffix}"
             wandb.init(
                 job_type="eval",
-                name="step4_linear_probe",
+                name=run_name,
                 config={
                     "models":     args.models,
                     "max_length": args.max_length,
                     "pooling":    args.pooling,
+                    "seed":       args.seed,
+                    "repeat_index": args.repeat_index,
                     "gb_tasks":   gb_n,
                     "nt_tasks":   nt_n,
                     "gue_tasks":  gue_n,
@@ -740,7 +757,7 @@ def main():
                                          pooling=args.pooling,
                                          desc=f"  {display_name} test ")
 
-            metrics = run_linear_probe(train_emb, train_labels, test_emb, test_labels)
+            metrics = run_linear_probe(train_emb, train_labels, test_emb, test_labels, seed=args.seed)
             results[spec.name][task_key] = metrics
 
             # Display primary metric per source convention

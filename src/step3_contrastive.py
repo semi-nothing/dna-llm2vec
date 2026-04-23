@@ -610,8 +610,11 @@ def build_training_args(args) -> TrainingArguments:
         logging_dir=os.path.join(args.output, "logs"),
         logging_steps=args.log_steps,
         report_to=["wandb"] if not args.no_wandb else [],
-        run_name=f"step3_{args.mode}",
-        seed=42,
+        run_name=args.run_name or (
+            f"step3_{args.mode}_s{args.seed}"
+            + (f"_r{args.repeat_index}" if args.repeat_index is not None else "")
+        ),
+        seed=args.seed,
         prediction_loss_only=True,
         remove_unused_columns=False,   # keep "sequence" col for our custom collator
     )
@@ -642,7 +645,7 @@ def load_contrastive_data(args, tokenizer) -> tuple:
             filter_n=args.filter_n,
         )
         print(f"  Loaded {len(seqs):,} chunks from FASTA")
-        random.seed(42)
+        random.seed(args.seed)
         random.shuffle(seqs)
         n_val = max(1, int(len(seqs) * args.val_fraction))
         return RawSequenceDataset(seqs[n_val:]), RawSequenceDataset(seqs[:n_val])
@@ -726,10 +729,16 @@ def parse_args():
                    help="Enable gradient checkpointing (~30%% slower, ~60%% less activation VRAM)")
     p.add_argument("--patience",   type=int, default=0,
                    help="Early stopping patience in eval steps. 0 = disabled.")
+    p.add_argument("--seed",       type=int, default=42,
+                   help="Random seed (default: 42)")
 
     # Resume / W&B
     p.add_argument("--resume",    default=None,
                    help="Resume from checkpoint path, or 'latest' to auto-detect")
+    p.add_argument("--run-name",  default=None,
+                   help="Optional W&B run name. If omitted, a descriptive name is generated.")
+    p.add_argument("--repeat-index", type=int, default=None,
+                   help="Optional repeat id for repeated experiments, e.g. 1, 2, 3.")
     p.add_argument("--no-wandb",  action="store_true", help="Disable W&B logging")
 
     return p.parse_args()
@@ -737,6 +746,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     # ── Device / dtype ────────────────────────────────────────────────────────
     device = "cuda" if torch.cuda.is_available() else "cpu"

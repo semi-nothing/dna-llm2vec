@@ -16,7 +16,9 @@ Usage:
 
 import argparse
 import os
+import random
 import sys
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM, GPT2Config
@@ -304,11 +306,20 @@ def parse_args():
         "--skip-sanity", action="store_true",
         help="Skip the sanity check (faster, useful if VRAM is tight)"
     )
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed (default: 42)")
+    parser.add_argument("--run-name", default=None,
+                        help="Optional experiment/run label for command consistency.")
+    parser.add_argument("--repeat-index", type=int, default=None,
+                        help="Optional repeat id for repeated experiments, e.g. 1, 2, 3.")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     # 0. Environment
     device = check_environment()

@@ -45,6 +45,7 @@ import argparse
 import copy
 import json
 import os
+import random
 import sys
 from dataclasses import dataclass
 
@@ -385,9 +386,11 @@ def train_one_task(
     test_ds  = SeqDataset(test_seqs,  test_y,  tokenizer, args.max_length)
     pad_id   = tokenizer.pad_token_id
     collate  = lambda b: _collate_fn(b, pad_id)
+    generator = torch.Generator()
+    generator.manual_seed(args.seed)
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                           num_workers=0, pin_memory=(device == "cuda"),
-                          collate_fn=collate)
+                          collate_fn=collate, generator=generator)
     test_dl  = DataLoader(test_ds,  batch_size=args.batch_size, shuffle=False,
                           num_workers=0, pin_memory=(device == "cuda"),
                           collate_fn=collate)
@@ -559,6 +562,12 @@ def parse_args():
     p.add_argument("--lora-dropout", type=float, default=0.1)
     p.add_argument("--grad-ckpt",    action="store_true",
                    help="Enable gradient checkpointing to reduce activation memory.")
+    p.add_argument("--seed",         type=int, default=42,
+                   help="Random seed (default: 42)")
+    p.add_argument("--run-name",     default=None,
+                   help="Optional W&B run name. If omitted, a descriptive name is generated.")
+    p.add_argument("--repeat-index", type=int, default=None,
+                   help="Optional repeat id for repeated experiments, e.g. 1, 2, 3.")
     p.add_argument("--no-wandb",     action="store_true")
     p.add_argument("--gue-plus-dir", default="",
                    help="Root directory of the locally downloaded GUE+ data "
@@ -584,6 +593,9 @@ def parse_args():
 def main():
     args  = parse_args()
     specs = [ModelSpec.parse(s) for s in args.models]
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     global _epi_subdir_map
     if args.epi_subdir_names:
@@ -624,6 +636,9 @@ def main():
     print(f"  Models     : {[s.name for s in specs]}")
     print(f"  Epochs     : {args.epochs}  |  LR: {args.lr}  |  LoRA r={args.lora_r}")
     print(f"  Max length : {args.max_length}")
+    print(f"  Seed       : {args.seed}")
+    if args.repeat_index is not None:
+        print(f"  Repeat     : {args.repeat_index}")
     print("=" * 68)
 
     # ── W&B ───────────────────────────────────────────────────────────────
@@ -632,15 +647,27 @@ def main():
         os.environ["WANDB_ENTITY"]  = "liangyuan-edin-queen-mary-university-of-london"
         try:
             import wandb
+            model_label = "_".join(s.name for s in specs)
+            suite_label = (
+                "gb" if args.gb_only else
+                "nt" if args.nt_only else
+                "gue" if args.gue_only else
+                "gueplus" if args.gue_plus_only else
+                "all"
+            )
+            repeat_suffix = f"_r{args.repeat_index}" if args.repeat_index is not None else ""
+            run_name = args.run_name or f"step5_lora_{suite_label}_{model_label}_s{args.seed}{repeat_suffix}"
             wandb.init(
                 job_type="finetune_eval",
-                name="step5_lora_finetune",
+                name=run_name,
                 config={
                     "models":     args.models,
                     "epochs":     args.epochs,
                     "lr":         args.lr,
                     "lora_r":     args.lora_r,
                     "max_length": args.max_length,
+                    "seed":       args.seed,
+                    "repeat_index": args.repeat_index,
                     "gb_tasks":   gb_n,
                     "nt_tasks":   nt_n,
                     "gue_tasks":  gue_n,

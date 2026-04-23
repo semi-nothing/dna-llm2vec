@@ -375,6 +375,10 @@ def build_training_args(output_dir: str, args: argparse.Namespace) -> TrainingAr
 
         # ── Misc ──────────────────────────────────────────────────────────
         seed=args.seed,
+        run_name=args.run_name or (
+            f"step2_mntp_s{args.seed}"
+            + (f"_r{args.repeat_index}" if args.repeat_index is not None else "")
+        ),
         report_to="wandb",
         torch_compile=True,      # PyTorch 2.11 has stable Blackwell (sm_120) support
         remove_unused_columns=False,
@@ -436,6 +440,10 @@ def parse_args():
     parser.add_argument("--lr",          type=float, default=1e-5, help="Learning rate (default: 1e-5)")
     parser.add_argument("--warmup-steps",type=int,   default=500,  help="LR warmup steps (default: 500)")
     parser.add_argument("--seed",        type=int,   default=42,   help="Random seed (default: 42)")
+    parser.add_argument("--run-name",    default=None,
+                        help="Optional W&B run name. If omitted, a descriptive name is generated.")
+    parser.add_argument("--repeat-index", type=int, default=None,
+                        help="Optional repeat id for repeated experiments, e.g. 1, 2, 3.")
     parser.add_argument(
         "--resume", default=None,
         metavar="CHECKPOINT_DIR",

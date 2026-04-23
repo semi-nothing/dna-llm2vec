@@ -369,6 +369,10 @@ def build_training_args(output_dir: str, args: argparse.Namespace) -> TrainingAr
 
         # Misc
         seed=args.seed,
+        run_name=args.run_name or (
+            f"step2_lora_mntp_s{args.seed}"
+            + (f"_r{args.repeat_index}" if args.repeat_index is not None else "")
+        ),
         report_to="wandb",
         torch_compile=True,
         remove_unused_columns=False,
@@ -426,6 +430,10 @@ def parse_args():
                    help="Learning rate (default: 1e-4; higher than full FT is standard for LoRA)")
     p.add_argument("--warmup-steps", type=int,   default=500,  help="LR warmup steps (default: 500)")
     p.add_argument("--seed",         type=int,   default=42,   help="Random seed (default: 42)")
+    p.add_argument("--run-name",     default=None,
+                   help="Optional W&B run name. If omitted, a descriptive name is generated.")
+    p.add_argument("--repeat-index", type=int, default=None,
+                   help="Optional repeat id for repeated experiments, e.g. 1, 2, 3.")
     p.add_argument("--grad-ckpt",    action="store_true",
                    help="Enable gradient checkpointing (~30%% slower, ~60%% less activation VRAM)")
     p.add_argument("--resume",       default=None, metavar="CHECKPOINT_DIR",

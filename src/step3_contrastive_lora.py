@@ -57,6 +57,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -796,8 +797,11 @@ def build_training_args(args) -> TrainingArguments:
         logging_dir=os.path.join(args.output, "logs"),
         logging_steps=args.log_steps,
         report_to=["wandb"] if not args.no_wandb else [],
-        run_name=f"step3_lora_{args.mode}",
-        seed=42,
+        run_name=args.run_name or (
+            f"step3_lora_{args.mode}_s{args.seed}"
+            + (f"_r{args.repeat_index}" if args.repeat_index is not None else "")
+        ),
+        seed=args.seed,
         prediction_loss_only=True,
         remove_unused_columns=False,
     )
@@ -815,7 +819,7 @@ def load_contrastive_data(args, tokenizer) -> tuple:
                 {"gene_id": f"smoke_gene_{i}", "sequence": seq}
                 for i, seq in enumerate(seqs)
             ]
-            random.seed(42)
+            random.seed(args.seed)
             random.shuffle(genes)
             n_val = max(1, int(len(genes) * args.val_fraction))
             return (
@@ -846,7 +850,7 @@ def load_contrastive_data(args, tokenizer) -> tuple:
                 filter_n=args.filter_n,
                 feature=args.gene_feature,
             )
-            random.seed(42)
+            random.seed(args.seed)
             random.shuffle(genes)
             n_val = max(1, int(len(genes) * args.val_fraction))
             return (
@@ -868,7 +872,7 @@ def load_contrastive_data(args, tokenizer) -> tuple:
             filter_n=args.filter_n,
         )
         print(f"  {len(seqs):,} chunks loaded")
-        random.seed(42)
+        random.seed(args.seed)
         random.shuffle(seqs)
         n_val = max(1, int(len(seqs) * args.val_fraction))
         return RawSequenceDataset(seqs[n_val:]), RawSequenceDataset(seqs[:n_val])
@@ -987,6 +991,12 @@ def parse_args():
     p.add_argument("--grad-ckpt",  action="store_true", default=False)
     p.add_argument("--patience",   type=int,   default=0)
     p.add_argument("--resume",     default=None)
+    p.add_argument("--seed",       type=int, default=42,
+                   help="Random seed (default: 42)")
+    p.add_argument("--run-name",   default=None,
+                   help="Optional W&B run name. If omitted, a descriptive name is generated.")
+    p.add_argument("--repeat-index", type=int, default=None,
+                   help="Optional repeat id for repeated experiments, e.g. 1, 2, 3.")
     p.add_argument("--no-wandb",   action="store_true")
 
     return p.parse_args()
@@ -996,6 +1006,9 @@ def parse_args():
 
 def main():
     args   = parse_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype  = torch.bfloat16 if device == "cuda" else torch.float32
 
