@@ -38,6 +38,7 @@ import argparse
 import copy
 import json
 import os
+import pickle
 import random
 import sys
 from dataclasses import dataclass
@@ -103,6 +104,8 @@ GUE_HF_DATASET  = "leannmlindsey/GUE"
 
 _nt_cache:  dict = {}
 _gue_cache: dict = {}
+_gb_root = os.environ.get("GENOMIC_BENCHMARKS_DIR", os.path.expanduser("~/.genomic_benchmarks"))
+_benchmark_cache_dir = "./cache/benchmarks"
 
 # GUE+ EPI — Enhancer-Promoter Interaction (DNABERT-2 extended benchmark)
 # 6 datasets, 5000 bp sequences, binary classification.
@@ -120,6 +123,13 @@ _EPI_SUBDIR_DEFAULT = {
     "epi_3": "IMR90",   "epi_4": "K562",    "epi_5": "NHEK",
 }
 _epi_subdir_map: dict = {}
+
+def _gb_pickle_path(task_key: str) -> str:
+    return os.path.join(_benchmark_cache_dir, f"gb_{task_key}.pkl")
+
+def _gb_task_present(task_key: str) -> bool:
+    task_dir = os.path.join(_gb_root, task_key)
+    return os.path.isdir(task_dir)
 
 
 # ── Model spec ────────────────────────────────────────────────────────────────
@@ -147,16 +157,26 @@ class ModelSpec:
 # ── Data loading (same logic as step4) ───────────────────────────────────────
 
 def _load_gb(task_key: str):
+    cache_path = _gb_pickle_path(task_key)
+    if os.path.isfile(cache_path):
+        with open(cache_path, "rb") as fh:
+            return pickle.load(fh)
+
     from genomic_benchmarks.loc2seq import download_dataset
     from genomic_benchmarks.dataset_getters.pytorch_datasets import GenomicClfDataset
-    download_dataset(task_key, version=0)
+    if not _gb_task_present(task_key):
+        download_dataset(task_key, version=0)
     def _unpack(split):
         ds = GenomicClfDataset(task_key, split=split)
         seqs, labels = zip(*[(s, l) for s, l in ds])
         return list(seqs), list(labels)
     tr_s, tr_l = _unpack("train")
     te_s, te_l = _unpack("test")
-    return tr_s, tr_l, te_s, te_l
+    payload = (tr_s, tr_l, te_s, te_l)
+    os.makedirs(_benchmark_cache_dir, exist_ok=True)
+    with open(cache_path, "wb") as fh:
+        pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    return payload
 
 
 def _load_nt(task_key: str):
@@ -564,6 +584,10 @@ def parse_args():
     p.add_argument("--output",       default="./eval_results/ft_results.json")
     p.add_argument("--batch-size",   type=int,   default=8)
     p.add_argument("--max-length",   type=int,   default=1024)
+    p.add_argument("--gb-root", default=os.environ.get("GENOMIC_BENCHMARKS_DIR", os.path.expanduser("~/.genomic_benchmarks")),
+                   help="Root directory for genomic_benchmarks task folders. If a task is missing here, it will be downloaded.")
+    p.add_argument("--benchmark-cache-dir", default="./cache/benchmarks",
+                   help="Directory for serialized benchmark caches (used to avoid repeatedly scanning GB small files).")
     p.add_argument("--epochs",       type=int,   default=5)
     p.add_argument("--lr",           type=float, default=3e-5)
     p.add_argument("--weight-decay", type=float, default=0.01)
@@ -613,6 +637,9 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    global _gb_root, _benchmark_cache_dir
+    _gb_root = os.path.expanduser(args.gb_root)
+    _benchmark_cache_dir = args.benchmark_cache_dir
 
     global _epi_subdir_map
     if args.epi_subdir_names:

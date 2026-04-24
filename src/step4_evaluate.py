@@ -59,6 +59,7 @@ Usage
 import argparse
 import json
 import os
+import pickle
 import sys
 from dataclasses import dataclass
 
@@ -187,13 +188,28 @@ class ModelSpec:
 
 _nt_cache:  dict = {}
 _gue_cache: dict = {}
+_gb_root = os.environ.get("GENOMIC_BENCHMARKS_DIR", os.path.expanduser("~/.genomic_benchmarks"))
+_benchmark_cache_dir = "./cache/benchmarks"
+
+def _gb_pickle_path(task_key: str) -> str:
+    return os.path.join(_benchmark_cache_dir, f"gb_{task_key}.pkl")
+
+def _gb_task_present(task_key: str) -> bool:
+    task_dir = os.path.join(_gb_root, task_key)
+    return os.path.isdir(task_dir)
 
 def _load_gb(task_key: str) -> tuple[list[str], list, list[str], list]:
     """Load a Genomics Benchmarks task via the genomic-benchmarks package."""
+    cache_path = _gb_pickle_path(task_key)
+    if os.path.isfile(cache_path):
+        with open(cache_path, "rb") as fh:
+            return pickle.load(fh)
+
     from genomic_benchmarks.loc2seq import download_dataset
     from genomic_benchmarks.dataset_getters.pytorch_datasets import GenomicClfDataset
 
-    download_dataset(task_key, version=0)
+    if not _gb_task_present(task_key):
+        download_dataset(task_key, version=0)
 
     def _unpack(split):
         ds = GenomicClfDataset(task_key, split=split)
@@ -202,7 +218,11 @@ def _load_gb(task_key: str) -> tuple[list[str], list, list[str], list]:
 
     train_seqs, train_labels = _unpack("train")
     test_seqs,  test_labels  = _unpack("test")
-    return train_seqs, train_labels, test_seqs, test_labels
+    payload = (train_seqs, train_labels, test_seqs, test_labels)
+    os.makedirs(_benchmark_cache_dir, exist_ok=True)
+    with open(cache_path, "wb") as fh:
+        pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    return payload
 
 
 def _load_nt(task_key: str) -> tuple[list[str], list, list[str], list]:
@@ -591,6 +611,10 @@ def parse_args():
     p.add_argument("--output",     default="./eval_results/results.json")
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--max-length", type=int, default=1024)
+    p.add_argument("--gb-root", default=os.environ.get("GENOMIC_BENCHMARKS_DIR", os.path.expanduser("~/.genomic_benchmarks")),
+                   help="Root directory for genomic_benchmarks task folders. If a task is missing here, it will be downloaded.")
+    p.add_argument("--benchmark-cache-dir", default="./cache/benchmarks",
+                   help="Directory for serialized benchmark caches (used to avoid repeatedly scanning GB small files).")
     p.add_argument(
         "--pooling",
         choices=("mean", "weighted_mean", "last", "cls", "eos"),
@@ -644,6 +668,9 @@ def main():
     specs = [ModelSpec.parse(s) for s in args.models]
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    global _gb_root, _benchmark_cache_dir
+    _gb_root = os.path.expanduser(args.gb_root)
+    _benchmark_cache_dir = args.benchmark_cache_dir
 
     # Populate EPI subdir map from args (or keep defaults)
     global _epi_subdir_map
