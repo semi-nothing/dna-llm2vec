@@ -6,12 +6,12 @@ Evaluates DNA embeddings using a linear probe on three benchmark suites:
   GB  — Genomics Benchmarks (Grevsova et al., 2023), 6 tasks.
         Core evaluation suite; DNABERT-2 literature has published numbers.
         Loaded via the genomic-benchmarks Python package.
-        Primary metric: accuracy.
+        Conventional display metric: accuracy.
 
   NT  — Nucleotide Transformer downstream tasks (Dalla-Torre et al., 2023),
         4 representative tasks (H3K4me3, H3K36me3, H3K9ac, splice_sites_all).
         Shows generalisation beyond GB. Loaded from HuggingFace Hub.
-        Primary metric: accuracy.
+        Conventional display metric: accuracy, while F1 and MCC are also computed.
 
   GUE — Genome Understanding Evaluation (Ji et al., 2021; used by DNABERT-2),
         18 tasks across promoter detection, TF binding, splicing, virus.
@@ -766,11 +766,15 @@ def main():
             metrics = run_linear_probe(train_emb, train_labels, test_emb, test_labels, seed=args.seed)
             results[spec.name][task_key] = metrics
 
-            # Display primary metric per source convention
+            # Display all task metrics for every suite so later comparisons do not
+            # depend on a single hard-coded benchmark convention.
             if source in ("gue", "gue+"):
                 print(f"  {display_name:<28}  F1={metrics['f1']*100:.2f}%  MCC={metrics['mcc']*100:.2f}%")
             else:
-                print(f"  {display_name:<28}  acc={metrics['accuracy']*100:.2f}%")
+                print(
+                    f"  {display_name:<28}  acc={metrics['accuracy']*100:.2f}%  "
+                    f"F1={metrics['f1']*100:.2f}%  MCC={metrics['mcc']*100:.2f}%"
+                )
 
         del model
         if device == "cuda":
@@ -792,9 +796,21 @@ def main():
             results[model_name]["avg_gb_accuracy"] = float(np.nanmean(
                 [_metric_val(task_metrics_map.get(b[0], {}), "accuracy") for b in gb_active]
             ))
+            results[model_name]["avg_gb_f1"] = float(np.nanmean(
+                [_metric_val(task_metrics_map.get(b[0], {}), "f1") for b in gb_active]
+            ))
+            results[model_name]["avg_gb_mcc"] = float(np.nanmean(
+                [_metric_val(task_metrics_map.get(b[0], {}), "mcc") for b in gb_active]
+            ))
         if nt_active:
             results[model_name]["avg_nt_accuracy"] = float(np.nanmean(
                 [_metric_val(task_metrics_map.get(b[0], {}), "accuracy") for b in nt_active]
+            ))
+            results[model_name]["avg_nt_f1"] = float(np.nanmean(
+                [_metric_val(task_metrics_map.get(b[0], {}), "f1") for b in nt_active]
+            ))
+            results[model_name]["avg_nt_mcc"] = float(np.nanmean(
+                [_metric_val(task_metrics_map.get(b[0], {}), "mcc") for b in nt_active]
             ))
         if gue_active:
             results[model_name]["avg_gue_f1"] = float(np.nanmean(
@@ -817,11 +833,31 @@ def main():
             "Genomics Benchmarks (Grevsova et al., 2023)",
             metric="accuracy",
         )
+        print_results_table(
+            results, gb_active,
+            "Genomics Benchmarks (Grevsova et al., 2023)",
+            metric="f1",
+        )
+        print_results_table(
+            results, gb_active,
+            "Genomics Benchmarks (Grevsova et al., 2023)",
+            metric="mcc",
+        )
     if nt_active:
         print_results_table(
             results, nt_active,
             "Nucleotide Transformer Downstream Tasks",
             metric="accuracy",
+        )
+        print_results_table(
+            results, nt_active,
+            "Nucleotide Transformer Downstream Tasks",
+            metric="f1",
+        )
+        print_results_table(
+            results, nt_active,
+            "Nucleotide Transformer Downstream Tasks",
+            metric="mcc",
         )
     if gue_active:
         print_results_table(
@@ -853,8 +889,16 @@ def main():
         parts = []
         if "avg_gb_accuracy" in m:
             parts.append(f"GB acc={m['avg_gb_accuracy']*100:.2f}%")
+        if "avg_gb_f1" in m:
+            parts.append(f"GB F1={m['avg_gb_f1']*100:.2f}%")
+        if "avg_gb_mcc" in m:
+            parts.append(f"GB MCC={m['avg_gb_mcc']*100:.2f}%")
         if "avg_nt_accuracy" in m:
             parts.append(f"NT acc={m['avg_nt_accuracy']*100:.2f}%")
+        if "avg_nt_f1" in m:
+            parts.append(f"NT F1={m['avg_nt_f1']*100:.2f}%")
+        if "avg_nt_mcc" in m:
+            parts.append(f"NT MCC={m['avg_nt_mcc']*100:.2f}%")
         if "avg_gue_f1" in m:
             parts.append(f"GUE F1={m['avg_gue_f1']*100:.2f}%")
         if "avg_gue_mcc" in m:
