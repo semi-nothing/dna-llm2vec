@@ -423,38 +423,44 @@ def encode_sequences(
 
     for i in tqdm(range(0, len(sequences), batch_size), desc=desc, leave=False):
         batch = sequences[i : i + batch_size]
-        enc = tokenizer(
-            batch,
-            truncation=True,
-            max_length=max_length,
-            padding="longest",
-            return_tensors="pt",
-        )
-        enc = {k: v.to(device) for k, v in enc.items()}
+        with torch.inference_mode():
+            enc = tokenizer(
+                batch,
+                truncation=True,
+                max_length=max_length,
+                padding="longest",
+                return_tensors="pt",
+            )
+            enc = {k: v.to(device) for k, v in enc.items()}
 
-        # Decoder (GPT-2): use model.transformer submodule
-        # Encoder (BERT/ESM): call model directly
-        if hasattr(model, "transformer"):
-            out = model.transformer(
-                input_ids=enc["input_ids"],
+            # Decoder (GPT-2): use model.transformer submodule
+            # Encoder (BERT/ESM): call model directly
+            if hasattr(model, "transformer"):
+                out = model.transformer(
+                    input_ids=enc["input_ids"],
+                    attention_mask=enc["attention_mask"],
+                )
+            else:
+                out = model(
+                    input_ids=enc["input_ids"],
+                    attention_mask=enc["attention_mask"],
+                )
+            hidden = out.last_hidden_state                            # (B, T, D)
+            pooled = pool_hidden_states(
+                hidden=hidden,
                 attention_mask=enc["attention_mask"],
-            )
-        else:
-            out = model(
                 input_ids=enc["input_ids"],
-                attention_mask=enc["attention_mask"],
+                pooling=pooling,
+                eos_token_id=tokenizer.eos_token_id,
             )
-        hidden = out.last_hidden_state                            # (B, T, D)
-        pooled = pool_hidden_states(
-            hidden=hidden,
-            attention_mask=enc["attention_mask"],
-            input_ids=enc["input_ids"],
-            pooling=pooling,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-        pooled = F.normalize(pooled, dim=-1)
+            pooled = F.normalize(pooled, dim=-1)
 
         all_embeddings.append(pooled.cpu().float().numpy())
+
+        # Release per-batch GPU tensors promptly to avoid long-run fragmentation.
+        del enc, out, hidden, pooled
+        if device == "cuda":
+            torch.cuda.empty_cache()
 
     return np.concatenate(all_embeddings, axis=0)
 
