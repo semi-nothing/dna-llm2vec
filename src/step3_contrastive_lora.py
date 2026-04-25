@@ -1,5 +1,5 @@
 """
-DNA-LLM2Vec  |  Step 3 (LoRA): Contrastive Fine-tuning �?LLM2Vec style
+DNA-LLM2Vec  |  Step 3 (LoRA): Contrastive Fine-tuning LLM2Vec style
 ========================================================================
 LoRA-based contrastive training with four improvements over step3_contrastive.py:
 
@@ -8,7 +8,7 @@ LoRA-based contrastive training with four improvements over step3_contrastive.py
 
   2. Dropout=0.3 for dropout mode (M3): LLM2Vec found 0.1 insufficient for
      dropout-based SimCSE; 0.3 creates diverse enough positive pairs.
-     (revcomp mode is unaffected �?positive pairs are different sequences.)
+     (revcomp mode is unaffected positive pairs are different sequences.)
 
   3. device_map removed: loading with device_map="auto" wraps the model in
      an Accelerate dispatch object, causing device mismatches when extracting
@@ -19,22 +19,22 @@ LoRA-based contrastive training with four improvements over step3_contrastive.py
 
 Checkpoint layout:
   <output>/checkpoint-N/
-    adapter_model.safetensors   �?LoRA adapter weights
+    adapter_model.safetensors   LoRA adapter weights
     adapter_config.json
-    proj_head.pt                �?projection head state dict (if used)
+    proj_head.pt                projection head state dict (if used)
   <output>/
-    config.json                 �?final merged GPT2LMHeadModel (encoder only)
-    model.safetensors           �?(projection head NOT saved, as per original design)
+    config.json                 final merged GPT2LMHeadModel (encoder only)
+    model.safetensors           (projection head NOT saved, as per original design)
 
 Usage:
-  # M3 �?dropout SimCSE (LoRA, dropout=0.3):
+  # M3 dropout SimCSE (LoRA, dropout=0.3):
   uv run python src/step3_contrastive_lora.py \\
       --model  ./mntp_dnagpt_lora \\
       --fasta  ./data/hg38.fa \\
       --output ./contrastive_dnagpt_dropout_lora \\
       --mode   dropout --max-steps 1000
 
-  # M4 �?reverse complement (LoRA, proposed method):
+  # M4 reverse complement (LoRA, proposed method):
   uv run python src/step3_contrastive_lora.py \\
       --model  ./mntp_dnagpt_lora \\
       --fasta  ./data/hg38.fa \\
@@ -98,7 +98,7 @@ def set_dropout(model: nn.Module, p: float, skip_lora: bool = True):
     skip_lora=True (default): skips LoRA adapter dropout layers so their
     carefully tuned lora_dropout value is not overridden.
 
-    Note: only affects dropout during model.train() �?eval() disables all dropout.
+    Note: only affects dropout during model.train() eval() disables all dropout.
     """
     count = 0
     for name, module in model.named_modules():
@@ -236,7 +236,7 @@ class CropPairCollator:
 
     Each stored sequence is `long_size = chunk_size + max_shift` bp.
     Two crop start positions are sampled independently from [0, max_shift],
-    guaranteeing overlap �?chunk_size * overlap_ratio.
+    guaranteeing overlap chunk_size * overlap_ratio.
     """
     tokenizer:     object
     chunk_size:    int          # bp length of each crop
@@ -251,11 +251,11 @@ class CropPairCollator:
         for f in features:
             seq = f["sequence"]
             if len(seq) < self.chunk_size:
-                # sequence too short �?use as-is for both sides
+                # sequence too short use as-is for both sides
                 seqs_a.append(seq)
                 seqs_b.append(seq)
             elif self.max_shift == 0 or len(seq) < self.chunk_size + self.max_shift:
-                # no room to shift �?identical crops (valid degenerate positive)
+                # no room to shift identical crops (valid degenerate positive)
                 seqs_a.append(seq[:self.chunk_size])
                 seqs_b.append(seq[:self.chunk_size])
             else:
@@ -363,7 +363,7 @@ class DNAGPTForContrastiveLora(nn.Module):
     Architecture:
       PeftModel (TaskType.FEATURE_EXTRACTION)
         └── GPT2LMHeadModel (frozen base + bidirectional patch)
-              └── transformer.h[*].attn.c_attn / c_proj  �?LoRA adapters
+              └── transformer.h[*].attn.c_attn / c_proj  LoRA adapters
 
     encode() routes through peft_model.base_model.model.transformer,
     which includes the LoRA-modified attention layers.
@@ -458,7 +458,7 @@ class DNAGPTForContrastiveLora(nn.Module):
 
     def save_pretrained(self, save_dir: str, merge: bool = True):
         """
-        merge=True  (final): merge LoRA �?save encoder only as GPT2LMHeadModel.
+        merge=True  (final): merge LoRA save encoder only as GPT2LMHeadModel.
                              Projection head is NOT saved (matches original design).
         merge=False (ckpt) : save LoRA adapter weights + projection head separately.
         """
@@ -669,7 +669,7 @@ def load_contrastive_data(args, tokenizer) -> tuple:
             )
             split = int(len(seqs) * 0.99)
             return RawSequenceDataset(seqs[:split]), RawSequenceDataset(seqs[split:])
-        print("[Data] Smoke-test �?synthetic sequences")
+        print("[Data] Smoke-test synthetic sequences")
         seqs  = _smoke_test_sequences(n=2000)
         split = int(len(seqs) * 0.99)
         return RawSequenceDataset(seqs[:split]), RawSequenceDataset(seqs[split:])
@@ -756,7 +756,7 @@ def parse_args():
     p.add_argument("--temperature", type=float, default=0.05)
     p.add_argument("--proj-dim",    type=int,   default=256)
 
-    # Dropout �?only active in dropout mode
+    # Dropout only active in dropout mode
     p.add_argument("--dropout", type=float, default=0.3,
                    help="Attention/embedding dropout for dropout mode. "
                         "LLM2Vec recommends 0.3 (default). Ignored in revcomp/crop mode.")
@@ -764,7 +764,7 @@ def parse_args():
                    help="Optional dropout override for revcomp/crop/local_shift. "
                         "Use this to combine local_shift positives with dropout view noise.")
 
-    # Crop �?only active in crop mode
+    # Crop only active in crop mode
     p.add_argument("--overlap-ratio", type=float, default=0.5,
                    help="[crop mode] Minimum overlap between the two crops as a fraction "
                         "of --chunk-size (0 < ratio < 1). Default: 0.5 (50%% overlap).")
@@ -772,7 +772,7 @@ def parse_args():
                    help="[crop mode] Nucleotide length of each crop. "
                         "Default: max_length * 2 bp (half the loaded window).")
 
-    # Local-shift �?only active in local_shift mode
+    # Local-shift only active in local_shift mode
     p.add_argument("--local-shift-ratio", type=float, default=0.1,
                    help="[local_shift mode] Maximum absolute shift as a fraction of --chunk-size. "
                         "Default: 0.1 (10%% of the crop length).")
@@ -830,7 +830,7 @@ def main():
     dtype  = torch.bfloat16 if device == "cuda" else torch.float32
 
     print("=" * 62)
-    print(f"DNA-LLM2Vec  |  Step 3 (LoRA) �?Contrastive ({args.mode})")
+    print(f"DNA-LLM2Vec  |  Step 3 (LoRA) Contrastive ({args.mode})")
     print("=" * 62)
     if device == "cuda":
         print(f"  GPU  : {torch.cuda.get_device_name(0)}")
@@ -863,7 +863,7 @@ def main():
     # ── 2. Load base model + apply LoRA ──────────────────────────────────────
     print(f"\n[2/5] Loading MNTP model + applying LoRA")
 
-    # Load on CPU, move to device manually �?avoids device_map dispatch issues
+    # Load on CPU, move to device manually avoids device_map dispatch issues
     base = AutoModelForCausalLM.from_pretrained(
         args.model,
         torch_dtype=dtype,
@@ -974,7 +974,7 @@ def main():
     print(
         f"\nStep 3 (LoRA) complete.\n"
         f"Encoder saved to: {args.output}\n"
-        f"(Projection head discarded �?use the encoder directly for embeddings.)\n"
+        f"(Projection head discarded use the encoder directly for embeddings.)\n"
         f"Next step: python src/step4_evaluate.py --models 'M4:{args.output}:bidir'"
     )
 
