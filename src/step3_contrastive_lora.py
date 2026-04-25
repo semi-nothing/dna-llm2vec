@@ -1,5 +1,5 @@
 """
-DNA-LLM2Vec  |  Step 3 (LoRA): Contrastive Fine-tuning — LLM2Vec style
+DNA-LLM2Vec  |  Step 3 (LoRA): Contrastive Fine-tuning �?LLM2Vec style
 ========================================================================
 LoRA-based contrastive training with four improvements over step3_contrastive.py:
 
@@ -8,7 +8,7 @@ LoRA-based contrastive training with four improvements over step3_contrastive.py
 
   2. Dropout=0.3 for dropout mode (M3): LLM2Vec found 0.1 insufficient for
      dropout-based SimCSE; 0.3 creates diverse enough positive pairs.
-     (revcomp mode is unaffected — positive pairs are different sequences.)
+     (revcomp mode is unaffected �?positive pairs are different sequences.)
 
   3. device_map removed: loading with device_map="auto" wraps the model in
      an Accelerate dispatch object, causing device mismatches when extracting
@@ -19,22 +19,22 @@ LoRA-based contrastive training with four improvements over step3_contrastive.py
 
 Checkpoint layout:
   <output>/checkpoint-N/
-    adapter_model.safetensors   ← LoRA adapter weights
+    adapter_model.safetensors   �?LoRA adapter weights
     adapter_config.json
-    proj_head.pt                ← projection head state dict (if used)
+    proj_head.pt                �?projection head state dict (if used)
   <output>/
-    config.json                 ← final merged GPT2LMHeadModel (encoder only)
-    model.safetensors           ← (projection head NOT saved, as per original design)
+    config.json                 �?final merged GPT2LMHeadModel (encoder only)
+    model.safetensors           �?(projection head NOT saved, as per original design)
 
 Usage:
-  # M3 — dropout SimCSE (LoRA, dropout=0.3):
+  # M3 �?dropout SimCSE (LoRA, dropout=0.3):
   uv run python src/step3_contrastive_lora.py \\
       --model  ./mntp_dnagpt_lora \\
       --fasta  ./data/hg38.fa \\
       --output ./contrastive_dnagpt_dropout_lora \\
       --mode   dropout --max-steps 1000
 
-  # M4 — reverse complement (LoRA, proposed method):
+  # M4 �?reverse complement (LoRA, proposed method):
   uv run python src/step3_contrastive_lora.py \\
       --model  ./mntp_dnagpt_lora \\
       --fasta  ./data/hg38.fa \\
@@ -48,7 +48,6 @@ Usage:
 """
 
 import argparse
-import gzip
 import math
 import os
 import random
@@ -99,7 +98,7 @@ def set_dropout(model: nn.Module, p: float, skip_lora: bool = True):
     skip_lora=True (default): skips LoRA adapter dropout layers so their
     carefully tuned lora_dropout value is not overridden.
 
-    Note: only affects dropout during model.train() — eval() disables all dropout.
+    Note: only affects dropout during model.train() �?eval() disables all dropout.
     """
     count = 0
     for name, module in model.named_modules():
@@ -137,48 +136,6 @@ class RawSequenceDataset(TorchDataset):
 
     def __getitem__(self, idx):
         return {"sequence": self.sequences[idx]}
-
-
-class GeneContextDataset(TorchDataset):
-    """Positive pairs = two low-overlap windows sampled from the same gene."""
-
-    def __init__(
-        self,
-        genes: list[dict],
-        chunk_size: int,
-        max_overlap_ratio: float = 0.25,
-    ):
-        if not (0.0 <= max_overlap_ratio < 1.0):
-            raise ValueError("max_overlap_ratio must be in [0, 1)")
-        self.genes = genes
-        self.chunk_size = chunk_size
-        self.max_overlap = int(chunk_size * max_overlap_ratio)
-
-    def __len__(self):
-        return len(self.genes)
-
-    def _sample_starts(self, seq_len: int) -> tuple[int, int]:
-        max_start = seq_len - self.chunk_size
-        if max_start <= 0:
-            return 0, 0
-        for _ in range(20):
-            a = random.randint(0, max_start)
-            b = random.randint(0, max_start)
-            overlap = max(0, min(a, b) + self.chunk_size - max(a, b))
-            if overlap <= self.max_overlap:
-                return a, b
-        # Fallback for short genes where low-overlap windows are impossible.
-        return 0, max_start
-
-    def __getitem__(self, idx):
-        gene = self.genes[idx]
-        seq = gene["sequence"]
-        a, b = self._sample_starts(len(seq))
-        return {
-            "seq_a": seq[a : a + self.chunk_size],
-            "seq_b": seq[b : b + self.chunk_size],
-            "gene_id": gene["gene_id"],
-        }
 
 
 def _smoke_test_sequences(n: int = 2000, min_len: int = 64, max_len: int = 512) -> list[str]:
@@ -226,141 +183,6 @@ def _extract_sequences_from_fasta(
         print(f"  [filter_n] dropped {n_filtered:,} N-containing chunks")
     return sequences
 
-
-def _open_text(path: str):
-    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path, "rt")
-
-
-def _iter_fasta_records(fasta_path: str):
-    """Yield (record_name, sequence) from FASTA without stripping non-ACGT bases."""
-    name = None
-    seq_chunks = []
-    with _open_text(fasta_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith(">"):
-                if name is not None:
-                    yield name, "".join(seq_chunks).upper()
-                name = line[1:].split()[0]
-                seq_chunks = []
-            else:
-                seq_chunks.append(line)
-    if name is not None:
-        yield name, "".join(seq_chunks).upper()
-
-
-def _parse_gtf_attrs(attr_text: str) -> dict:
-    attrs = {}
-    for item in attr_text.strip().rstrip(";").split(";"):
-        item = item.strip()
-        if not item:
-            continue
-        if " " in item:
-            key, value = item.split(" ", 1)
-            attrs[key] = value.strip().strip('"')
-        elif "=" in item:
-            key, value = item.split("=", 1)
-            attrs[key] = value.strip().strip('"')
-    return attrs
-
-
-def _read_gene_intervals(gtf_path: str, feature: str = "gene") -> dict[str, list[dict]]:
-    intervals: dict[str, list[dict]] = {}
-    with _open_text(gtf_path) as f:
-        for line in f:
-            if not line.strip() or line.startswith("#"):
-                continue
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 9 or parts[2] != feature:
-                continue
-            chrom, _, _, start, end, _, strand, _, attrs_text = parts
-            attrs = _parse_gtf_attrs(attrs_text)
-            gene_id = attrs.get("gene_id") or attrs.get("ID") or attrs.get("Name")
-            if gene_id is None:
-                gene_id = f"{chrom}:{start}-{end}:{strand}"
-            intervals.setdefault(chrom, []).append({
-                "start": int(start) - 1,  # GTF is 1-based inclusive.
-                "end": int(end),
-                "strand": strand,
-                "gene_id": gene_id,
-            })
-    for chrom_intervals in intervals.values():
-        chrom_intervals.sort(key=lambda x: x["start"])
-    return intervals
-
-
-def _chrom_aliases(chrom: str) -> tuple[str, ...]:
-    if chrom.startswith("chr"):
-        return (chrom, chrom[3:])
-    return (chrom, f"chr{chrom}")
-
-
-def _extract_gene_context_genes(
-    fasta_path: str,
-    gtf_path: str,
-    chunk_size: int,
-    min_gene_bp: int,
-    max_genes: Optional[int],
-    filter_n: bool,
-    feature: str,
-) -> list[dict]:
-    from data_utils import VALID_BASES as _VALID_BASES
-
-    intervals_by_chrom = _read_gene_intervals(gtf_path, feature=feature)
-    genes = []
-    skipped_ambiguous = 0
-    skipped_short = 0
-
-    print(f"  Reading GTF: {gtf_path}  [feature={feature}]")
-    print(f"  Gene contigs: {len(intervals_by_chrom):,}")
-    print(f"  Reading FASTA genes from: {fasta_path}")
-
-    for chrom, chrom_seq in _iter_fasta_records(fasta_path):
-        intervals = None
-        for alias in _chrom_aliases(chrom):
-            if alias in intervals_by_chrom:
-                intervals = intervals_by_chrom[alias]
-                break
-        if not intervals:
-            continue
-
-        kept_before = len(genes)
-        for interval in intervals:
-            start = max(0, interval["start"])
-            end = min(len(chrom_seq), interval["end"])
-            if end - start < min_gene_bp:
-                skipped_short += 1
-                continue
-
-            seq = chrom_seq[start:end]
-            if filter_n and _VALID_BASES.search(seq):
-                skipped_ambiguous += 1
-                continue
-            if not filter_n:
-                seq = _VALID_BASES.sub("", seq)
-            if len(seq) < min_gene_bp:
-                skipped_short += 1
-                continue
-            if interval["strand"] == "-":
-                seq = reverse_complement(seq)
-
-            genes.append({"gene_id": interval["gene_id"], "sequence": seq})
-            if max_genes and len(genes) >= max_genes:
-                break
-
-        print(f"  {chrom}: kept {len(genes) - kept_before:,} genes")
-        if max_genes and len(genes) >= max_genes:
-            break
-
-    print(f"  Gene-context genes loaded: {len(genes):,}")
-    print(f"  Skipped short genes: {skipped_short:,}")
-    if filter_n:
-        print(f"  Skipped genes with N/ambiguous bases: {skipped_ambiguous:,}")
-    if not genes:
-        raise ValueError("No gene_context genes loaded. Check --gtf contig names and --gene-min-bp.")
-    return genes
 
 
 # ── Collators (unchanged) ─────────────────────────────────────────────────────
@@ -414,7 +236,7 @@ class CropPairCollator:
 
     Each stored sequence is `long_size = chunk_size + max_shift` bp.
     Two crop start positions are sampled independently from [0, max_shift],
-    guaranteeing overlap ≥ chunk_size * overlap_ratio.
+    guaranteeing overlap �?chunk_size * overlap_ratio.
     """
     tokenizer:     object
     chunk_size:    int          # bp length of each crop
@@ -429,11 +251,11 @@ class CropPairCollator:
         for f in features:
             seq = f["sequence"]
             if len(seq) < self.chunk_size:
-                # sequence too short — use as-is for both sides
+                # sequence too short �?use as-is for both sides
                 seqs_a.append(seq)
                 seqs_b.append(seq)
             elif self.max_shift == 0 or len(seq) < self.chunk_size + self.max_shift:
-                # no room to shift — identical crops (valid degenerate positive)
+                # no room to shift �?identical crops (valid degenerate positive)
                 seqs_a.append(seq[:self.chunk_size])
                 seqs_b.append(seq[:self.chunk_size])
             else:
@@ -458,15 +280,40 @@ class CropPairCollator:
 
 
 @dataclass
-class GeneContextPairCollator:
-    """Tokenise two windows sampled from the same annotated gene."""
+class LocalShiftPairCollator:
+    """Positive pairs = a center crop plus a small local shift from the same window."""
 
     tokenizer: object
+    chunk_size: int
+    max_shift_ratio: float = 0.1
     max_length: int = 512
 
+    def __post_init__(self):
+        if not (0.0 <= self.max_shift_ratio < 1.0):
+            raise ValueError("max_shift_ratio must be in [0, 1)")
+        self.max_shift = int(self.chunk_size * self.max_shift_ratio)
+        self.anchor = self.max_shift
+
     def __call__(self, features: list[dict]) -> dict:
-        seqs_a = [f["seq_a"] for f in features]
-        seqs_b = [f["seq_b"] for f in features]
+        seqs_a, seqs_b = [], []
+        for f in features:
+            seq = f["sequence"]
+            if len(seq) < self.chunk_size:
+                seqs_a.append(seq)
+                seqs_b.append(seq)
+                continue
+            if self.max_shift == 0 or len(seq) < self.chunk_size + 2 * self.max_shift:
+                base = seq[: self.chunk_size]
+                seqs_a.append(base)
+                seqs_b.append(base)
+                continue
+
+            delta = random.randint(-self.max_shift, self.max_shift)
+            start_a = self.anchor
+            start_b = self.anchor + delta
+            seqs_a.append(seq[start_a : start_a + self.chunk_size])
+            seqs_b.append(seq[start_b : start_b + self.chunk_size])
+
         enc_a = self.tokenizer(
             seqs_a, truncation=True, max_length=self.max_length,
             padding="longest", return_tensors="pt",
@@ -516,7 +363,7 @@ class DNAGPTForContrastiveLora(nn.Module):
     Architecture:
       PeftModel (TaskType.FEATURE_EXTRACTION)
         └── GPT2LMHeadModel (frozen base + bidirectional patch)
-              └── transformer.h[*].attn.c_attn / c_proj  ← LoRA adapters
+              └── transformer.h[*].attn.c_attn / c_proj  �?LoRA adapters
 
     encode() routes through peft_model.base_model.model.transformer,
     which includes the LoRA-modified attention layers.
@@ -611,7 +458,7 @@ class DNAGPTForContrastiveLora(nn.Module):
 
     def save_pretrained(self, save_dir: str, merge: bool = True):
         """
-        merge=True  (final): merge LoRA → save encoder only as GPT2LMHeadModel.
+        merge=True  (final): merge LoRA �?save encoder only as GPT2LMHeadModel.
                              Projection head is NOT saved (matches original design).
         merge=False (ckpt) : save LoRA adapter weights + projection head separately.
         """
@@ -811,52 +658,24 @@ def build_training_args(args) -> TrainingArguments:
 
 def load_contrastive_data(args, tokenizer) -> tuple:
     if args.smoke_test:
-        if args.mode == "gene_context":
-            print("[Data] Smoke-test synthetic gene_context sequences")
+        if args.mode == "local_shift":
+            print("[Data] Smoke-test synthetic local_shift sequences")
             chunk_size = args.chunk_size or args.max_length * 2
-            seqs = _smoke_test_sequences(n=2000, min_len=chunk_size * 2, max_len=chunk_size * 4)
-            genes = [
-                {"gene_id": f"smoke_gene_{i}", "sequence": seq}
-                for i, seq in enumerate(seqs)
-            ]
-            random.seed(args.seed)
-            random.shuffle(genes)
-            n_val = max(1, int(len(genes) * args.val_fraction))
-            return (
-                GeneContextDataset(genes[n_val:], chunk_size, args.gene_max_overlap_ratio),
-                GeneContextDataset(genes[:n_val], chunk_size, args.gene_max_overlap_ratio),
+            max_shift = int(chunk_size * args.local_shift_ratio)
+            seqs = _smoke_test_sequences(
+                n=2000,
+                min_len=chunk_size + 2 * max_shift,
+                max_len=max((chunk_size + 2 * max_shift) * 2, chunk_size + 2 * max_shift),
             )
-        print("[Data] Smoke-test — synthetic sequences")
+            split = int(len(seqs) * 0.99)
+            return RawSequenceDataset(seqs[:split]), RawSequenceDataset(seqs[split:])
+        print("[Data] Smoke-test �?synthetic sequences")
         seqs  = _smoke_test_sequences(n=2000)
         split = int(len(seqs) * 0.99)
         return RawSequenceDataset(seqs[:split]), RawSequenceDataset(seqs[split:])
 
     if args.fasta:
         print(f"[Data] FASTA: {args.fasta}")
-        if args.mode == "gene_context":
-            if not args.gtf:
-                raise ValueError("--mode gene_context requires --gtf")
-            chunk_size = args.chunk_size or args.max_length * 2
-            min_gene_bp = max(args.gene_min_bp, chunk_size * 2)
-            print(f"  gene_context mode: chunk_size={chunk_size} bp, "
-                  f"min_gene_bp={min_gene_bp} bp, "
-                  f"max_overlap={args.gene_max_overlap_ratio:.0%}")
-            genes = _extract_gene_context_genes(
-                fasta_path=args.fasta,
-                gtf_path=args.gtf,
-                chunk_size=chunk_size,
-                min_gene_bp=min_gene_bp,
-                max_genes=args.gene_max_genes,
-                filter_n=args.filter_n,
-                feature=args.gene_feature,
-            )
-            random.seed(args.seed)
-            random.shuffle(genes)
-            n_val = max(1, int(len(genes) * args.val_fraction))
-            return (
-                GeneContextDataset(genes[n_val:], chunk_size, args.gene_max_overlap_ratio),
-                GeneContextDataset(genes[:n_val], chunk_size, args.gene_max_overlap_ratio),
-            )
         if args.mode == "crop":
             chunk_size = args.chunk_size or args.max_length * 2
             max_shift  = int(chunk_size * (1.0 - args.overlap_ratio))
@@ -864,6 +683,13 @@ def load_contrastive_data(args, tokenizer) -> tuple:
             print(f"  crop mode: chunk_size={chunk_size} bp, "
                   f"overlap_ratio={args.overlap_ratio:.0%}, "
                   f"long_window={chunk_bp} bp")
+        elif args.mode == "local_shift":
+            chunk_size = args.chunk_size or args.max_length * 2
+            max_shift  = int(chunk_size * args.local_shift_ratio)
+            chunk_bp   = chunk_size + 2 * max_shift
+            print(f"  local_shift mode: chunk_size={chunk_size} bp, "
+                  f"max_shift_ratio={args.local_shift_ratio:.0%}, "
+                  f"max_shift={max_shift} bp, long_window={chunk_bp} bp")
         else:
             chunk_bp   = args.max_length * 4
         stride_bp = args.stride if args.stride > 0 else chunk_bp
@@ -878,8 +704,8 @@ def load_contrastive_data(args, tokenizer) -> tuple:
         return RawSequenceDataset(seqs[n_val:]), RawSequenceDataset(seqs[:n_val])
 
     if args.dataset:
-        if args.mode == "gene_context":
-            raise ValueError("--mode gene_context currently requires --fasta and --gtf")
+        if args.mode == "local_shift":
+            raise ValueError("--mode local_shift currently requires --fasta or --smoke-test")
         print(f"[Data] HuggingFace: {args.dataset}")
         from datasets import load_dataset
         raw  = load_dataset(args.dataset)
@@ -926,19 +752,19 @@ def parse_args():
 
     # Contrastive
     p.add_argument("--mode",        default="revcomp",
-                   choices=["dropout", "revcomp", "crop", "gene_context"])
+                   choices=["dropout", "revcomp", "crop", "local_shift"])
     p.add_argument("--temperature", type=float, default=0.05)
     p.add_argument("--proj-dim",    type=int,   default=256)
 
-    # Dropout — only active in dropout mode
+    # Dropout �?only active in dropout mode
     p.add_argument("--dropout", type=float, default=0.3,
                    help="Attention/embedding dropout for dropout mode. "
                         "LLM2Vec recommends 0.3 (default). Ignored in revcomp/crop mode.")
     p.add_argument("--view-dropout", type=float, default=None,
-                   help="Optional dropout override for revcomp/crop/gene_context. "
-                        "Use this to combine gene_context positives with dropout view noise.")
+                   help="Optional dropout override for revcomp/crop/local_shift. "
+                        "Use this to combine local_shift positives with dropout view noise.")
 
-    # Crop — only active in crop mode
+    # Crop �?only active in crop mode
     p.add_argument("--overlap-ratio", type=float, default=0.5,
                    help="[crop mode] Minimum overlap between the two crops as a fraction "
                         "of --chunk-size (0 < ratio < 1). Default: 0.5 (50%% overlap).")
@@ -946,19 +772,10 @@ def parse_args():
                    help="[crop mode] Nucleotide length of each crop. "
                         "Default: max_length * 2 bp (half the loaded window).")
 
-    # Gene-context — only active in gene_context mode
-    p.add_argument("--gtf", default=None,
-                   help="[gene_context mode] GTF/GFF annotation file with gene intervals.")
-    p.add_argument("--gene-feature", default="gene",
-                   help="[gene_context mode] Feature type to use from --gtf. Default: gene.")
-    p.add_argument("--gene-min-bp", type=int, default=0,
-                   help="[gene_context mode] Minimum gene length in bp. "
-                        "Default: max(0, 2 * --chunk-size).")
-    p.add_argument("--gene-max-genes", type=int, default=None,
-                   help="[gene_context mode] Optional cap on loaded genes for fast ablations.")
-    p.add_argument("--gene-max-overlap-ratio", type=float, default=0.25,
-                   help="[gene_context mode] Maximum allowed overlap between positive "
-                        "windows as a fraction of --chunk-size. Default: 0.25.")
+    # Local-shift �?only active in local_shift mode
+    p.add_argument("--local-shift-ratio", type=float, default=0.1,
+                   help="[local_shift mode] Maximum absolute shift as a fraction of --chunk-size. "
+                        "Default: 0.1 (10%% of the crop length).")
 
     # LoRA
     p.add_argument("--lora-r",       type=int,   default=16)
@@ -1013,7 +830,7 @@ def main():
     dtype  = torch.bfloat16 if device == "cuda" else torch.float32
 
     print("=" * 62)
-    print(f"DNA-LLM2Vec  |  Step 3 (LoRA) — Contrastive ({args.mode})")
+    print(f"DNA-LLM2Vec  |  Step 3 (LoRA) �?Contrastive ({args.mode})")
     print("=" * 62)
     if device == "cuda":
         print(f"  GPU  : {torch.cuda.get_device_name(0)}")
@@ -1026,10 +843,10 @@ def main():
         _cs = args.chunk_size or args.max_length * 2
         print(f"  Crop : overlap_ratio={args.overlap_ratio:.0%}, chunk_size={_cs} bp, "
               f"min_overlap={int(_cs * args.overlap_ratio)} bp")
-    if args.mode == "gene_context":
+    if args.mode == "local_shift":
         _cs = args.chunk_size or args.max_length * 2
-        print(f"  Gene context : chunk_size={_cs} bp, "
-              f"max_overlap={args.gene_max_overlap_ratio:.0%}, gtf={args.gtf}")
+        print(f"  Local shift : chunk_size={_cs} bp, "
+              f"max_shift_ratio={args.local_shift_ratio:.0%}, max_shift={int(_cs * args.local_shift_ratio)} bp")
     if args.view_dropout is not None and args.mode != "dropout":
         print(f"  View dropout : {args.view_dropout}  (applied with {args.mode} positives)")
     steps_info = f"{args.max_steps} steps" if args.max_steps > 0 else f"{args.epochs} epochs"
@@ -1046,7 +863,7 @@ def main():
     # ── 2. Load base model + apply LoRA ──────────────────────────────────────
     print(f"\n[2/5] Loading MNTP model + applying LoRA")
 
-    # Load on CPU, move to device manually — avoids device_map dispatch issues
+    # Load on CPU, move to device manually �?avoids device_map dispatch issues
     base = AutoModelForCausalLM.from_pretrained(
         args.model,
         torch_dtype=dtype,
@@ -1092,9 +909,12 @@ def main():
             overlap_ratio=args.overlap_ratio,
             max_length=args.max_length,
         )
-    else:  # gene_context
-        collator = GeneContextPairCollator(
+    else:  # local_shift
+        _chunk_size = args.chunk_size or args.max_length * 2
+        collator = LocalShiftPairCollator(
             tokenizer=tokenizer,
+            chunk_size=_chunk_size,
+            max_shift_ratio=args.local_shift_ratio,
             max_length=args.max_length,
         )
 
@@ -1154,10 +974,16 @@ def main():
     print(
         f"\nStep 3 (LoRA) complete.\n"
         f"Encoder saved to: {args.output}\n"
-        f"(Projection head discarded — use the encoder directly for embeddings.)\n"
+        f"(Projection head discarded �?use the encoder directly for embeddings.)\n"
         f"Next step: python src/step4_evaluate.py --models 'M4:{args.output}:bidir'"
     )
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
