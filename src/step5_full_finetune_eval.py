@@ -36,6 +36,7 @@ Usage
 
 import argparse
 import copy
+import gc
 import json
 import os
 import pickle
@@ -428,6 +429,7 @@ def train_one_task(
         # ── train ──────────────────────────────────────────────────────────
         classifier.train()
         total_loss = 0.0
+        optimizer.zero_grad(set_to_none=True)
         for batch in train_dl:
             input_ids      = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
@@ -436,19 +438,20 @@ def train_one_task(
             logits = classifier(input_ids, attention_mask)
             loss   = F.cross_entropy(logits, labels)
 
-            optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(trainable, args.grad_clip)
             optimizer.step()
             scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
             total_loss += loss.item()
+            del input_ids, attention_mask, labels, logits, loss
 
         avg_loss = total_loss / len(train_dl)
 
         # ── eval ───────────────────────────────────────────────────────────
         classifier.eval()
         all_preds, all_labels = [], []
-        with torch.no_grad():
+        with torch.inference_mode():
             for batch in test_dl:
                 input_ids      = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
@@ -457,6 +460,7 @@ def train_one_task(
                 preds  = logits.argmax(dim=-1)
                 all_preds.extend(preds.cpu().tolist())
                 all_labels.extend(labels.cpu().tolist())
+                del input_ids, attention_mask, labels, logits, preds
 
         acc = float(accuracy_score(all_labels, all_preds))
         f1 = float(f1_score(all_labels, all_preds, average="macro"))
@@ -495,10 +499,14 @@ def train_one_task(
     f1 = float(f1_score(all_labels, best_preds, average="macro"))
     mcc = float(matthews_corrcoef(all_labels, best_preds))
 
-    # Cleanup VRAM
-    del classifier, backbone
+    # Cleanup VRAM between tasks
+    del classifier, backbone, optimizer, scheduler, trainable
+    del train_dl, test_dl, train_ds, test_ds, generator
+    del all_preds, all_labels, best_preds, best_state, le, train_y, test_y
+    gc.collect()
     if device == "cuda":
         torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
     return {
         "accuracy": acc,
@@ -786,8 +794,10 @@ def main():
 
         # Free base model VRAM before loading the next one
         del base_model
+        gc.collect()
         if device == "cuda":
             torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
     # ── Aggregate averages ────────────────────────────────────────────────
     print("\n[3/3] Results")
