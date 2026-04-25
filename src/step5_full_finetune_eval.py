@@ -411,7 +411,8 @@ def train_one_task(
     trainable  = [p for p in classifier.parameters() if p.requires_grad]
     optimizer  = torch.optim.AdamW(trainable, lr=args.lr,
                                    weight_decay=args.weight_decay)
-    total_steps = len(train_dl) * args.epochs
+    steps_per_epoch = max(1, (len(train_dl) + args.grad_accum - 1) // args.grad_accum)
+    total_steps = steps_per_epoch * args.epochs
     if args.warmup_steps >= 0:
         warmup = min(args.warmup_steps, max(1, total_steps - 1))
     else:
@@ -430,20 +431,22 @@ def train_one_task(
         classifier.train()
         total_loss = 0.0
         optimizer.zero_grad(set_to_none=True)
-        for batch in train_dl:
+        for step_idx, batch in enumerate(train_dl, start=1):
             input_ids      = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels         = batch["labels"].to(device)
 
             logits = classifier(input_ids, attention_mask)
             loss   = F.cross_entropy(logits, labels)
+            total_loss += loss.item()
+            loss   = loss / args.grad_accum
 
             loss.backward()
-            nn.utils.clip_grad_norm_(trainable, args.grad_clip)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad(set_to_none=True)
-            total_loss += loss.item()
+            if step_idx % args.grad_accum == 0 or step_idx == len(train_dl):
+                nn.utils.clip_grad_norm_(trainable, args.grad_clip)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
             del input_ids, attention_mask, labels, logits, loss
 
         avg_loss = total_loss / len(train_dl)
@@ -591,6 +594,8 @@ def parse_args():
 
     p.add_argument("--output",       default="./eval_results/ft_results.json")
     p.add_argument("--batch-size",   type=int,   default=8)
+    p.add_argument("--grad-accum",   type=int,   default=1,
+                   help="Number of gradient accumulation steps (default: 1).")
     p.add_argument("--max-length",   type=int,   default=1024)
     p.add_argument("--gb-root", default=os.environ.get("GENOMIC_BENCHMARKS_DIR", os.path.expanduser("~/.genomic_benchmarks")),
                    help="Root directory for genomic_benchmarks task folders. If a task is missing here, it will be downloaded.")
