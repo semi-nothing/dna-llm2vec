@@ -15,6 +15,7 @@ wandb/
 *.out
 *.slurm
 *.md
+cache/
 
 # Data
 data/
@@ -28,6 +29,7 @@ data/
 *.gff3
 *.gff.gz
 *.gff3.gz
+*.pkl
 
 # Model outputs / checkpoints
 bidir_dnagpt/

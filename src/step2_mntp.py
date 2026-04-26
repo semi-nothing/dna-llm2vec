@@ -356,6 +356,7 @@ def build_training_args(output_dir: str, args: argparse.Namespace) -> TrainingAr
 
         # ── Schedule ──────────────────────────────────────────────────────
         num_train_epochs=args.epochs,
+        max_steps=args.max_steps,
         warmup_steps=args.warmup_steps,
         lr_scheduler_type="cosine",
 
@@ -435,6 +436,8 @@ def parse_args():
 
     # Training
     parser.add_argument("--epochs",      type=int,   default=3,    help="Training epochs (default: 3)")
+    parser.add_argument("--max-steps",   type=int,   default=-1,
+                        help="Maximum optimizer steps. -1 disables the limit and uses --epochs only.")
     parser.add_argument("--batch-size",  type=int,   default=16,   help="Per-device batch size (default: 16)")
     parser.add_argument("--grad-accum",  type=int,   default=2,    help="Gradient accumulation steps (default: 2)")
     parser.add_argument("--lr",          type=float, default=1e-5, help="Learning rate (default: 1e-5)")
@@ -468,6 +471,8 @@ def main():
     if device == "cuda":
         print(f"  GPU   : {torch.cuda.get_device_name(0)}")
         print(f"  VRAM  : {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    print(f"  Epochs: {args.epochs}")
+    print(f"  Max steps: {args.max_steps}")
         print(f"  dtype : bfloat16")
     print(f"  Model : {args.model}")
     print(f"  Output: {args.output}")

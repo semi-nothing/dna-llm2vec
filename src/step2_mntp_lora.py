@@ -350,6 +350,7 @@ def build_training_args(output_dir: str, args: argparse.Namespace) -> TrainingAr
 
         # Schedule
         num_train_epochs=args.epochs,
+        max_steps=args.max_steps,
         warmup_steps=args.warmup_steps,
         lr_scheduler_type="cosine",
 
@@ -423,6 +424,8 @@ def parse_args():
 
     # Training
     p.add_argument("--epochs",       type=int,   default=3,    help="Training epochs (default: 3)")
+    p.add_argument("--max-steps",    type=int,   default=-1,
+                   help="Maximum optimizer steps. -1 disables the limit and uses --epochs only.")
     p.add_argument("--batch-size",   type=int,   default=32,
                    help="Per-device batch size (default: 32; LoRA allows larger batches)")
     p.add_argument("--grad-accum",   type=int,   default=1,    help="Gradient accumulation steps (default: 1)")
@@ -455,6 +458,8 @@ def main():
     if device == "cuda":
         print(f"  GPU   : {torch.cuda.get_device_name(0)}")
         print(f"  VRAM  : {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    print(f"  Epochs: {args.epochs}")
+    print(f"  Max steps: {args.max_steps}")
     print(f"  Model : {args.model}")
     print(f"  Output: {args.output}")
     print(f"  LoRA  : r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
