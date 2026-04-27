@@ -1,5 +1,5 @@
 """
-DNA-LLM2Vec  |  Step 2 (LoRA): Masked Next Token Prediction �?LLM2Vec style
+DNA-LLM2Vec  |  Step 2 (LoRA): Masked Next Token Prediction LLM2Vec style
 =============================================================================
 LoRA-based MNTP with two key improvements over step2_mntp.py:
 
@@ -11,9 +11,9 @@ LoRA-based MNTP with two key improvements over step2_mntp.py:
      masked token at position i is predicted from the hidden state at
      position i-1, not from the [MASK] position itself.
 
-     Standard MLM : logits[:, i]   �?predict labels[:, i]
-     LLM2Vec MNTP : logits[:, i-1] �?predict labels[:, i]
-                    �? logits[:, :-1]  paired with  labels[:, 1:]
+     Standard MLM : logits[:, i]   predict labels[:, i]
+     LLM2Vec MNTP : logits[:, i-1] predict labels[:, i]
+                     logits[:, :-1]  paired with  labels[:, 1:]
 
      Rationale: GPT-2 was pretrained to predict token[i+1] from position[i].
      Predicting the masked token from position i-1 keeps the loss objective
@@ -26,9 +26,9 @@ Mask token:
   complications between wte and lm_head when applying LoRA.
 
 Checkpoint layout:
-  <output>/checkpoints/checkpoint-N/   �?LoRA adapter weights only
-  <output>/config.json                  �?final merged GPT2LMHeadModel
-  <output>/model.safetensors            �?(compatible with step3_contrastive.py)
+  <output>/checkpoints/checkpoint-N/   LoRA adapter weights only
+  <output>/config.json                  final merged GPT2LMHeadModel
+  <output>/model.safetensors            (compatible with step3_contrastive.py)
   <output>/tokenizer.*
 
 Prerequisites:
@@ -101,7 +101,7 @@ def build_lora_config(args):
     )
 
 
-# ── Model wrapper: GPT-2 + LoRA �?LLM2Vec-style MNTP ─────────────────────────
+# ── Model wrapper: GPT-2 + LoRA LLM2Vec-style MNTP ─────────────────────────
 
 class DNAGPTForMNTPLoRA(nn.Module):
     """
@@ -115,11 +115,11 @@ class DNAGPTForMNTPLoRA(nn.Module):
 
     Loss (LLM2Vec-style, shifted):
       logits[:, :-1] paired with labels[:, 1:]
-      �?at each position i-1, predict the original token at masked position i.
+      at each position i-1, predict the original token at masked position i.
 
     Saving:
-      Intermediate checkpoints �?LoRA adapter weights only (small, fast).
-      Final output             �?LoRA merged into base model �?GPT2LMHeadModel
+      Intermediate checkpoints LoRA adapter weights only (small, fast).
+      Final output             LoRA merged into base model GPT2LMHeadModel
                                  (directly loadable by step3_contrastive.py).
     """
 
@@ -142,9 +142,9 @@ class DNAGPTForMNTPLoRA(nn.Module):
     ) -> MaskedLMOutput:
         """
         Args:
-            input_ids      : (B, T) �?masked input (EOS replaces masked tokens)
-            attention_mask : (B, T) �?1 real, 0 padding
-            labels         : (B, T) �?original ids at masked positions, -100 elsewhere
+            input_ids      : (B, T) masked input (EOS replaces masked tokens)
+            attention_mask : (B, T) 1 real, 0 padding
+            labels         : (B, T) original ids at masked positions, -100 elsewhere
 
         The peft_model forward pass routes through LoRA-adapted layers and
         the all-ones attention bias (bidirectional patch from Step 1).
@@ -367,7 +367,7 @@ def build_training_args(output_dir: str, args: argparse.Namespace) -> TrainingAr
 
     Learning rate note:
       LoRA updates only adapter weights (~1% of params). A higher LR than
-      full fine-tuning (1e-4 vs 1e-5) is standard practice �?the frozen
+      full fine-tuning (1e-4 vs 1e-5) is standard practice the frozen
       base model weights prevent instability from large adapter updates.
     """
     return TrainingArguments(
@@ -377,13 +377,13 @@ def build_training_args(output_dir: str, args: argparse.Namespace) -> TrainingAr
         bf16=True,
         bf16_full_eval=True,
 
-        # Batch size �?LoRA uses less VRAM (frozen layers skip gradient storage),
+        # Batch size LoRA uses less VRAM (frozen layers skip gradient storage),
         # so per_device batch size can be larger than in step2_mntp.py
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
 
-        # Optimiser �?higher LR is appropriate for LoRA adapter-only updates
+        # Optimiser higher LR is appropriate for LoRA adapter-only updates
         learning_rate=args.lr,
         weight_decay=0.01,
         adam_beta1=0.9,
@@ -461,7 +461,7 @@ def parse_args():
     p.add_argument("--lora-r",       type=int,   default=16,
                    help="LoRA rank (default: 16, same as LLM2Vec)")
     p.add_argument("--lora-alpha",   type=int,   default=32,
-                   help="LoRA alpha �?effective scale = alpha/r (default: 32)")
+                   help="LoRA alpha effective scale = alpha/r (default: 32)")
     p.add_argument("--lora-dropout", type=float, default=0.05,
                    help="Dropout within LoRA adapters (default: 0.05)")
 
@@ -508,7 +508,7 @@ def main():
     print(f"  Model : {args.model}")
     print(f"  Output: {args.output}")
     print(f"  LoRA  : r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
-    print(f"  Pred  : LLM2Vec i-1 shift (logits[:,:-1] �?labels[:,1:])")
+    print(f"  Pred  : LLM2Vec i-1 shift (logits[:,:-1] labels[:,1:])")
     print("=" * 62)
 
     # ── 1. Tokenizer ─────────────────────────────────────────────────────────
@@ -518,7 +518,7 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Use EOS token as mask token �?avoids embedding resize (which breaks
+    # Use EOS token as mask token avoids embedding resize (which breaks
     # weight tying between wte and lm_head when applying LoRA).
     # Analogous to LLM2Vec using underscore '_' for LLaMA/Mistral.
     if tokenizer.mask_token is None:
@@ -560,7 +560,7 @@ def main():
         eval_dataset  = SyntheticDNADataset(tokenizer, n_samples=64,  seq_len=args.max_length)
 
     elif args.fasta:
-        print(f"  Mode: FASTA �?{args.fasta}")
+        print(f"  Mode: FASTA {args.fasta}")
         ds = load_fasta_dataset(
             args.fasta, tokenizer,
             max_length=args.max_length,
@@ -571,7 +571,7 @@ def main():
         eval_dataset  = ds["validation"]
 
     elif args.dataset:
-        print(f"  Mode: HuggingFace dataset �?{args.dataset}")
+        print(f"  Mode: HuggingFace dataset {args.dataset}")
         ds = load_hub_dataset(args.dataset, tokenizer, max_length=args.max_length)
         train_dataset = ds["train"]
         eval_dataset  = ds.get("validation", None)
@@ -642,7 +642,7 @@ def main():
             resume = os.path.join(ckpt_dir, ckpts[-1]) if ckpts else None
         else:
             resume = None
-        print(f"  Resuming from : {resume or 'none found �?starting fresh'}")
+        print(f"  Resuming from : {resume or 'none found starting fresh'}")
 
     # W&B
     os.environ["WANDB_PROJECT"] = "dna_foundation"
@@ -650,7 +650,7 @@ def main():
 
     train_result = trainer.train(resume_from_checkpoint=resume)
 
-    # ── Save �?merge LoRA into base model for step3 compatibility ─────────────
+    # ── Save merge LoRA into base model for step3 compatibility ─────────────
     print(f"\nMerging LoRA and saving to: {args.output}")
     model.save_pretrained(args.output, merge=True)
     tokenizer.save_pretrained(args.output)
