@@ -525,7 +525,11 @@ def load_model(spec: ModelSpec, device: str, dtype):
 
     if spec.mode == "encoder":
         # Bidirectional encoder (e.g. NT-500M / ESM): load as plain AutoModel
-        model = AutoModel.from_pretrained(path, torch_dtype=dtype, trust_remote_code=True)
+        from transformers import AutoConfig
+        enc_config = AutoConfig.from_pretrained(path, trust_remote_code=True)
+        if not hasattr(enc_config, "pad_token_id") or enc_config.pad_token_id is None:
+            enc_config.pad_token_id = tokenizer.pad_token_id or 0
+        model = AutoModel.from_pretrained(path, config=enc_config, torch_dtype=dtype, trust_remote_code=True)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             path, torch_dtype=dtype, attn_implementation="eager",
