@@ -536,6 +536,7 @@ def load_model(spec: ModelSpec, device: str, dtype):
             config=enc_config,
             trust_remote_code=True,
             torch_dtype=dtype,
+            low_cpu_mem_usage=False,
         )
     else:
         model = AutoModelForCausalLM.from_pretrained(
