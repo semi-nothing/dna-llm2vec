@@ -29,6 +29,8 @@ from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 import step4_evaluate as base
 
+DNABERT2_REVISION = "refs/pr/32"
+
 
 _generic_load_model = base.load_model
 
@@ -41,11 +43,19 @@ def load_model(spec, device: str, dtype):
     path = os.path.abspath(spec.path) if os.path.exists(spec.path) else spec.path
     print(f"  Loading {spec.name}  ({path}, mode={spec.mode}, dnabert2-wrapper)")
 
-    tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        path,
+        trust_remote_code=True,
+        revision=DNABERT2_REVISION,
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    enc_config = AutoConfig.from_pretrained(path, trust_remote_code=True)
+    enc_config = AutoConfig.from_pretrained(
+        path,
+        trust_remote_code=True,
+        revision=DNABERT2_REVISION,
+    )
     if not hasattr(enc_config, "pad_token_id") or enc_config.pad_token_id is None:
         enc_config.pad_token_id = tokenizer.pad_token_id or 0
     if hasattr(enc_config, "use_cache"):
@@ -59,6 +69,7 @@ def load_model(spec, device: str, dtype):
         path,
         config=enc_config,
         trust_remote_code=True,
+        revision=DNABERT2_REVISION,
         low_cpu_mem_usage=False,
         _fast_init=False,
         torch_dtype=torch.float32,
