@@ -519,13 +519,13 @@ def load_model(spec: ModelSpec, device: str, dtype):
     # Resolve relative paths to absolute so huggingface_hub doesn't reject './'
     path = os.path.abspath(spec.path) if os.path.exists(spec.path) else spec.path
     print(f"  Loading {spec.name}  ({path}, mode={spec.mode})")
-    tokenizer = AutoTokenizer.from_pretrained(path)
+    tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     if spec.mode == "encoder":
         # Bidirectional encoder (e.g. NT-500M / ESM): load as plain AutoModel
-        model = AutoModel.from_pretrained(path, torch_dtype=dtype)
+        model = AutoModel.from_pretrained(path, torch_dtype=dtype, trust_remote_code=True)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             path, torch_dtype=dtype, attn_implementation="eager",
