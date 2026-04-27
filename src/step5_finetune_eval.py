@@ -57,7 +57,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -385,7 +384,6 @@ def train_one_task(
     tokenizer,
     train_seqs, train_labels,
     test_seqs,  test_labels,
-    n_classes:     int,
     source:        str,
     device:        str,
     args,
@@ -423,6 +421,7 @@ def train_one_task(
     # Gradient checkpointing: recompute activations during backward instead of storing
     # them all simultaneously. ~30% slower per step but prevents OOM on large tasks.
     if args.grad_ckpt:
+        backbone.config.use_cache = False
         backbone.enable_input_require_grads()
         backbone.base_model.model.transformer.gradient_checkpointing_enable(
             {"use_reentrant": False}
@@ -442,6 +441,7 @@ def train_one_task(
 
     best_metric = -float("inf")
     best_preds  = None
+    best_labels = None
 
     for epoch in range(args.epochs):
         # ── train ──────────────────────────────────────────────────────────
@@ -488,6 +488,7 @@ def train_one_task(
         if f1 > best_metric:
             best_metric = f1
             best_preds  = list(all_preds)
+            best_labels = list(all_labels)
 
         primary = "F1" if source in ("gue", "gue+") else "acc"
         pval    = f1 if source in ("gue", "gue+") else accuracy_score(all_labels, all_preds)
@@ -495,14 +496,14 @@ def train_one_task(
               f"loss={avg_loss:.4f}  {primary}={pval*100:.2f}%")
 
     # ── final metrics from best checkpoint (best F1 epoch) ─────────────
-    acc = float(accuracy_score(all_labels, best_preds))
-    f1  = float(f1_score(all_labels, best_preds, average="macro"))
-    mcc = float(matthews_corrcoef(all_labels, best_preds))
+    acc = float(accuracy_score(best_labels, best_preds))
+    f1  = float(f1_score(best_labels, best_preds, average="macro"))
+    mcc = float(matthews_corrcoef(best_labels, best_preds))
 
     # Cleanup VRAM between tasks
     del classifier, backbone, optimizer, scheduler, trainable
     del train_dl, test_dl, train_ds, test_ds, generator
-    del all_preds, all_labels, best_preds, le, train_y, test_y
+    del all_preds, all_labels, best_preds, best_labels, le, train_y, test_y
     gc.collect()
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -759,7 +760,6 @@ def main():
             metrics = train_one_task(
                 base_model, tokenizer,
                 tr_s, tr_l, te_s, te_l,
-                n_classes=n_classes,
                 source=source,
                 device=device,
                 args=args,

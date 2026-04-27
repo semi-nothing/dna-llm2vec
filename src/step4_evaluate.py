@@ -25,7 +25,7 @@ six GUE+ EPI tasks too, or use --gue-plus-only to run only EPI.
 Model spec format  →  name:path:mode
   name  — label in results table (e.g. M0, M2)
   path  — local directory or HuggingFace model ID
-  mode  — "causal" (keep causal mask) | "bidir" (apply Step 1 patch)
+  mode  — "causal" (keep causal mask) | "bidir" (apply Step 1 patch) | "encoder" (bidirectional encoder, e.g. NT-500M/ESM)
 
 Usage
 -----
@@ -168,7 +168,7 @@ _epi_subdir_map: dict = {}   # populated from args at runtime
 class ModelSpec:
     name: str
     path: str
-    mode: str   # "causal" | "bidir"
+    mode: str   # "causal" | "bidir" | "encoder"
 
     @staticmethod
     def parse(spec: str) -> "ModelSpec":
@@ -476,11 +476,7 @@ def encode_sequences(
             pooled = F.normalize(pooled, dim=-1)
 
         all_embeddings.append(pooled.cpu().float().numpy())
-
-        # Release per-batch GPU tensors promptly to avoid long-run fragmentation.
         del enc, out, hidden, pooled
-        if device == "cuda":
-            torch.cuda.empty_cache()
 
     return np.concatenate(all_embeddings, axis=0)
 
@@ -803,7 +799,9 @@ def main():
                     f"F1={metrics['f1']*100:.2f}%  MCC={metrics['mcc']*100:.2f}%"
                 )
 
+        import gc
         del model
+        gc.collect()
         if device == "cuda":
             torch.cuda.empty_cache()
 
@@ -816,9 +814,6 @@ def main():
     guep_active = [b for b in active if b[3] == "gue+"]
 
     for model_name, task_metrics_map in results.items():
-        all_accs  = [_metric_val(task_metrics_map.get(b[0], {}), "accuracy") for b in active]
-        results[model_name]["avg_all_accuracy"] = float(np.nanmean(all_accs))
-
         if gb_active:
             results[model_name]["avg_gb_accuracy"] = float(np.nanmean(
                 [_metric_val(task_metrics_map.get(b[0], {}), "accuracy") for b in gb_active]

@@ -49,7 +49,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -360,7 +359,6 @@ def train_one_task(
     tokenizer,
     train_seqs, train_labels,
     test_seqs,  test_labels,
-    n_classes:     int,
     source:        str,
     device:        str,
     args,
@@ -422,9 +420,12 @@ def train_one_task(
     monitor_name = args.monitor
     best_metric = -float("inf")
     best_preds = None
+    best_labels = None
     best_epoch = 0
     epochs_without_improvement = 0
-    best_state = None
+    last_preds = None
+    last_labels = None
+    last_epoch = 0
 
     for epoch in range(args.epochs):
         # ── train ──────────────────────────────────────────────────────────
@@ -470,17 +471,17 @@ def train_one_task(
         mcc = float(matthews_corrcoef(all_labels, all_preds))
         metrics = {"accuracy": acc, "f1": f1, "mcc": mcc}
         monitor_val = metrics[monitor_name]
+        last_preds = list(all_preds)
+        last_labels = list(all_labels)
+        last_epoch = epoch + 1
 
         improved = monitor_val > (best_metric + args.min_delta)
         if improved:
             best_metric = monitor_val
             best_preds = list(all_preds)
+            best_labels = list(all_labels)
             best_epoch = epoch + 1
             epochs_without_improvement = 0
-            best_state = {
-                k: v.detach().cpu().clone()
-                for k, v in classifier.state_dict().items()
-            }
         else:
             epochs_without_improvement += 1
 
@@ -494,18 +495,29 @@ def train_one_task(
                   f"(best {monitor_name} at epoch {best_epoch:02d})")
             break
 
-    if best_state is not None:
-        classifier.load_state_dict(best_state)
+    # Reporting rule:
+    # - patience > 0: early stopping enabled, return the best monitored epoch
+    # - patience = 0: run full training and return the last epoch
+    use_best_epoch = args.patience > 0
+    peak_epoch = best_epoch
+    peak_metric = best_metric
+    if use_best_epoch and best_preds is not None and best_labels is not None:
+        report_preds = best_preds
+        report_labels = best_labels
+        report_epoch = best_epoch
+    else:
+        report_preds = last_preds
+        report_labels = last_labels
+        report_epoch = last_epoch
 
-    # Final reported metrics come from the best dev epoch, not the last epoch.
-    acc = float(accuracy_score(all_labels, best_preds))
-    f1 = float(f1_score(all_labels, best_preds, average="macro"))
-    mcc = float(matthews_corrcoef(all_labels, best_preds))
+    acc = float(accuracy_score(report_labels, report_preds))
+    f1 = float(f1_score(report_labels, report_preds, average="macro"))
+    mcc = float(matthews_corrcoef(report_labels, report_preds))
 
     # Cleanup VRAM between tasks
     del classifier, backbone, optimizer, scheduler, trainable
     del train_dl, test_dl, train_ds, test_ds, generator
-    del all_preds, all_labels, best_preds, best_state, le, train_y, test_y
+    del all_preds, all_labels, best_preds, best_labels, last_preds, last_labels, le, train_y, test_y
     gc.collect()
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -515,9 +527,11 @@ def train_one_task(
         "accuracy": acc,
         "f1": f1,
         "mcc": mcc,
-        "best_epoch": int(best_epoch),
+        "reported_epoch": int(report_epoch),
+        "selection_mode": "best" if use_best_epoch else "last",
+        "peak_epoch": int(peak_epoch),
         "best_monitor": monitor_name,
-        "best_monitor_value": float(best_metric),
+        "best_monitor_value": float(peak_metric),
     }
 
 
@@ -531,7 +545,7 @@ def load_base_model(spec: ModelSpec, device: str, dtype):
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        path, dtype=dtype, attn_implementation="eager",
+        path, torch_dtype=dtype, attn_implementation="eager",
     )
     if spec.mode == "bidir":
         model = patch_to_bidirectional(model)
@@ -639,6 +653,8 @@ def parse_args():
     p.add_argument("--epi-crop-mode", choices=("center", "junction"), default="center",
                    help="How to crop GUE+ EPI sequences: center uses the sequence midpoint; "
                         "junction centers on the enhancer/promoter boundary.")
+    p.add_argument("--filter-n", action="store_true",
+                   help="For GUE+ EPI, drop rows whose cropped sequence contains any non-ACGT base.")
     return p.parse_args()
 
 
@@ -755,10 +771,15 @@ def main():
             gue_plus_dir=args.gue_plus_dir,
             crop_bp=args.epi_crop_bp,
             crop_mode=args.epi_crop_mode,
+            filter_non_acgt=args.filter_n,
         )
         benchmark_data[task_key] = (tr_s, tr_l, te_s, te_l)
         split_label = "dev" if source in ("gue", "gue+") else "test"
-        extra = f"  [{args.epi_crop_mode}-cropped to {args.epi_crop_bp} bp]" if source == "gue+" else ""
+        extra = ""
+        if source == "gue+":
+            extra = f"  [{args.epi_crop_mode}-cropped to {args.epi_crop_bp} bp"
+            extra += ", filter-n" if args.filter_n else ""
+            extra += "]"
         print(f"       train={len(tr_s):,}  {split_label}={len(te_s):,}{extra}")
 
     # ── Evaluate each model ───────────────────────────────────────────────
@@ -781,7 +802,6 @@ def main():
             metrics = train_one_task(
                 base_model, tokenizer,
                 tr_s, tr_l, te_s, te_l,
-                n_classes=n_classes,
                 source=source,
                 device=device,
                 args=args,
