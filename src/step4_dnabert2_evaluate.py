@@ -47,6 +47,7 @@ def load_model(spec, device: str, dtype):
         path,
         trust_remote_code=True,
         revision=DNABERT2_REVISION,
+        force_download=True,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -55,6 +56,7 @@ def load_model(spec, device: str, dtype):
         path,
         trust_remote_code=True,
         revision=DNABERT2_REVISION,
+        force_download=True,
     )
     if not hasattr(enc_config, "pad_token_id") or enc_config.pad_token_id is None:
         enc_config.pad_token_id = tokenizer.pad_token_id or 0
@@ -70,6 +72,7 @@ def load_model(spec, device: str, dtype):
         config=enc_config,
         trust_remote_code=True,
         revision=DNABERT2_REVISION,
+        force_download=True,
         low_cpu_mem_usage=False,
         _fast_init=False,
         torch_dtype=torch.float32,
