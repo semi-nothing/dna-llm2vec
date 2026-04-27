@@ -62,6 +62,14 @@ def load_model(spec, device: str, dtype):
         enc_config.pad_token_id = tokenizer.pad_token_id or 0
     if hasattr(enc_config, "use_cache"):
         enc_config.use_cache = False
+    # DNABERT-2's custom Bert layers use Triton flash attention only when
+    # attention_probs_dropout_prob == 0.0. A tiny non-zero value forces the
+    # PyTorch attention path, which is much more robust across Triton versions.
+    if hasattr(enc_config, "attention_probs_dropout_prob"):
+        enc_config.attention_probs_dropout_prob = max(
+            float(getattr(enc_config, "attention_probs_dropout_prob", 0.0)),
+            1e-6,
+        )
 
     # Conservative load path for remote-code encoder models:
     # - disable low_cpu_mem_usage to avoid meta/lazy materialization
