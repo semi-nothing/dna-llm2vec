@@ -529,15 +529,19 @@ def load_model(spec: ModelSpec, device: str, dtype):
         enc_config = AutoConfig.from_pretrained(path, trust_remote_code=True)
         if not hasattr(enc_config, "pad_token_id") or enc_config.pad_token_id is None:
             enc_config.pad_token_id = tokenizer.pad_token_id or 0
-        # Pass torch_dtype at load time to avoid touching partially materialized
-        # meta tensors in some remote-code encoder models (e.g. DNABERT-2).
-        model = AutoModel.from_pretrained(
-            path,
-            config=enc_config,
-            trust_remote_code=True,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=False,
-        )
+        # Some remote-code encoder models (notably DNABERT-2) construct tensors
+        # inside __init__. Newer Transformers/PyTorch combinations can otherwise
+        # instantiate parts of the model on the meta device during loading and
+        # crash before weights are materialized. Force a conservative CPU load.
+        with torch.device("cpu"):
+            model = AutoModel.from_pretrained(
+                path,
+                config=enc_config,
+                trust_remote_code=True,
+                low_cpu_mem_usage=False,
+                _fast_init=False,
+            )
+        model = model.to(device=device, dtype=dtype)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             path, torch_dtype=dtype, attn_implementation="eager",
@@ -545,7 +549,8 @@ def load_model(spec: ModelSpec, device: str, dtype):
         if spec.mode == "bidir":
             model = patch_to_bidirectional(model)
 
-    model = model.to(device)
+    if spec.mode != "encoder":
+        model = model.to(device)
     model.eval()
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"    Parameters : {n_params:.1f}M  |  vocab: {len(tokenizer):,}")
