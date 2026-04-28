@@ -275,7 +275,9 @@ def _load_gue_plus(
         <gue_plus_dir>/EPI/<subdir>/train.csv
                                    dev.csv
                                    test.csv
-    CSV format: "sequence,label" header, binary labels 0/1.
+    CSV format:
+      - center crop: "sequence,label" or "seq,label"
+      - junction crop: requires separate "enhancer" and "promoter" columns
 
     Args:
         task_key    : one of "epi_0" … "epi_5"
@@ -303,14 +305,36 @@ def _load_gue_plus(
             raise FileNotFoundError(f"Missing: {path}")
         seqs, labels = [], []
         dropped = 0
+        dropped_empty_parts = 0
         with open(path, newline="") as fh:
             reader = _csv.DictReader(fh)
             for row in reader:
                 seq = row.get("sequence") or row.get("seq") or ""
                 anchor = None
-                if not seq and "enhancer" in row and "promoter" in row:
+                has_parts = "enhancer" in row and "promoter" in row
+
+                if crop_mode == "junction" and not has_parts:
+                    raise ValueError(
+                        f"EPI junction crop requires 'enhancer' and 'promoter' columns, "
+                        f"but {path} does not provide them. Current row keys: {sorted(row.keys())}. "
+                        f"Use --epi-crop-mode center for pre-concatenated sequence-only CSVs."
+                    )
+
+                if reverse_order and not has_parts:
+                    raise ValueError(
+                        f"--epi-reverse-order requires separate 'enhancer' and 'promoter' columns, "
+                        f"but {path} does not provide them. Current row keys: {sorted(row.keys())}."
+                    )
+
+                if has_parts:
                     enhancer = row["enhancer"].strip().upper()
                     promoter = row["promoter"].strip().upper()
+
+                    if (crop_mode == "junction" or reverse_order) and (not enhancer or not promoter):
+                        dropped_empty_parts += 1
+                        continue
+
+                if not seq and has_parts:
                     if reverse_order:
                         seq = promoter + enhancer
                         anchor = len(promoter)
@@ -323,8 +347,18 @@ def _load_gue_plus(
                     continue
                 labels.append(int(row["label"]))
                 seqs.append(seq)
+        if dropped_empty_parts:
+            print(
+                f"       [empty-enh/prom] dropped {dropped_empty_parts} {split_name} rows with "
+                f"empty enhancer/promoter fields"
+            )
         if dropped:
             print(f"       [filter-n] dropped {dropped} {split_name} rows with non-ACGT bases")
+        if not seqs:
+            raise ValueError(
+                f"No usable rows remain in {path} after filtering. "
+                f"Check enhancer/promoter fields and filtering settings."
+            )
         return seqs, labels
 
     tr_s, tr_l = _read_split("train")
@@ -681,12 +715,14 @@ def parse_args():
     p.add_argument(
         "--epi-crop-mode", choices=("center", "junction"), default="center",
         help="How to crop GUE+ EPI sequences: center uses the sequence midpoint; "
-             "junction centers on the enhancer/promoter boundary.",
+             "junction centers on the enhancer/promoter boundary and requires "
+             "separate enhancer/promoter columns in the CSV.",
     )
     p.add_argument(
         "--epi-reverse-order", action="store_true",
-        help="For GUE+ EPI rows that provide separate enhancer/promoter columns, "
-             "concatenate promoter+enhancer instead of enhancer+promoter.",
+        help="For GUE+ EPI rows with separate enhancer/promoter columns, "
+             "concatenate promoter+enhancer instead of enhancer+promoter. "
+             "This flag is invalid for sequence-only CSVs.",
     )
     p.add_argument(
         "--filter-n", action="store_true",

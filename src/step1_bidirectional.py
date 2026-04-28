@@ -133,10 +133,13 @@ def patch_to_bidirectional(model: nn.Module) -> nn.Module:
     # ── Strategies B & C: per-layer patches (older transformers) ──────────
     patched_bias = 0
     patched_flag = 0
+    attention_modules = []
+    expected_layers = getattr(getattr(model, "config", None), "n_layer", None)
 
     for name, module in model.named_modules():
         if "Attention" not in module.__class__.__name__:
             continue
+        attention_modules.append((name, module.__class__.__name__))
 
         # Strategy B: is_causal instance attribute
         if getattr(module, "is_causal", None) is True:
@@ -161,7 +164,30 @@ def patch_to_bidirectional(model: nn.Module) -> nn.Module:
     print(f"\n  config.is_causal=False  : {'yes' if config_patched else 'no'}")
     print(f"  is_causal flag layers   : {patched_flag}")
     print(f"  bias buffer layers      : {patched_bias}")
+    if expected_layers is not None:
+        print(f"  expected attention layers: {expected_layers}")
+        print(f"  discovered attention mods: {len(attention_modules)}")
     print("  Bidirectional attention : ENABLED")
+
+    if expected_layers is not None:
+        if len(attention_modules) != expected_layers:
+            discovered = ", ".join(f"{name}<{cls}>" for name, cls in attention_modules[:6])
+            if len(attention_modules) > 6:
+                discovered += " ..."
+            raise RuntimeError(
+                "patch_to_bidirectional() found an unexpected number of attention modules.\n"
+                f"  Expected n_layer={expected_layers}, discovered={len(attention_modules)}\n"
+                f"  Examples: {discovered}\n"
+                "  The transformers attention implementation may have changed."
+            )
+
+        if patched_flag != expected_layers and patched_bias != expected_layers:
+            raise RuntimeError(
+                "patch_to_bidirectional() did not fully patch the attention stack.\n"
+                f"  Expected {expected_layers} layers, but got patched_flag={patched_flag} "
+                f"and patched_bias={patched_bias}.\n"
+                "  Expected either all is_causal flags or all bias buffers to be patched."
+            )
 
     return model
 
