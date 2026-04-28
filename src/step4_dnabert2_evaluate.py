@@ -24,8 +24,11 @@ Use the same CLI as step4_evaluate.py. Example:
 
 import os
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 from transformers import AutoConfig, AutoModel, AutoTokenizer
+from tqdm import tqdm
 
 import step4_evaluate as base
 
@@ -33,6 +36,7 @@ DNABERT2_REVISION = "refs/pr/32"
 
 
 _generic_load_model = base.load_model
+_generic_encode_sequences = base.encode_sequences
 
 
 def load_model(spec, device: str, dtype):
@@ -102,7 +106,75 @@ def load_model(spec, device: str, dtype):
     return model, tokenizer
 
 
+def encode_sequences(
+    model,
+    tokenizer,
+    sequences: list[str],
+    batch_size: int,
+    max_length: int,
+    device: str,
+    pooling: str = "mean",
+    desc: str = "Encoding",
+) -> np.ndarray:
+    """DNABERT-2-safe encoder wrapper.
+
+    DNABERT-2 remote code may return a tuple instead of a HF output object.
+    Keep the generic pooling path but accept both output formats.
+    """
+    model.eval()
+    all_embeddings = []
+
+    for i in tqdm(range(0, len(sequences), batch_size), desc=desc, leave=False):
+        batch = sequences[i : i + batch_size]
+        with torch.inference_mode():
+            enc = tokenizer(
+                batch,
+                truncation=True,
+                max_length=max_length,
+                padding="longest",
+                return_tensors="pt",
+            )
+            enc = {k: v.to(device) for k, v in enc.items()}
+
+            if hasattr(model, "transformer"):
+                out = model.transformer(
+                    input_ids=enc["input_ids"],
+                    attention_mask=enc["attention_mask"],
+                )
+            else:
+                out = model(
+                    input_ids=enc["input_ids"],
+                    attention_mask=enc["attention_mask"],
+                )
+
+            if hasattr(out, "last_hidden_state"):
+                hidden = out.last_hidden_state
+            elif isinstance(out, tuple):
+                hidden = out[0]
+            else:
+                raise TypeError(
+                    f"Unsupported model output type {type(out)!r}; "
+                    "expected an object with last_hidden_state or a tuple whose "
+                    "first element is hidden states."
+                )
+
+            pooled = base.pool_hidden_states(
+                hidden=hidden,
+                attention_mask=enc["attention_mask"],
+                input_ids=enc["input_ids"],
+                pooling=pooling,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+            pooled = F.normalize(pooled, dim=-1)
+
+        all_embeddings.append(pooled.cpu().float().numpy())
+        del enc, out, hidden, pooled
+
+    return np.concatenate(all_embeddings, axis=0)
+
+
 base.load_model = load_model
+base.encode_sequences = encode_sequences
 
 
 if __name__ == "__main__":
