@@ -102,6 +102,36 @@ def build_lora_config(args):
     )
 
 
+def _load_base_for_peft_reload(base_model_path: str, tokenizer, dtype):
+    """
+    Reload the Step-1 backbone in a shape compatible with LoRA checkpoints.
+
+    When we add a dedicated [MASK] token, the tokenizer vocab grows by one.
+    Adapter checkpoints that save `wte` therefore expect the base model to be
+    resized to the tokenizer length before adapter weights are loaded.
+    """
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model_path,
+        torch_dtype=dtype,
+        attn_implementation="eager",
+    )
+    base = patch_to_bidirectional(base)
+
+    if tokenizer is not None:
+        target_vocab = len(tokenizer)
+        current_vocab = base.get_input_embeddings().weight.shape[0]
+        if current_vocab != target_vocab:
+            base.resize_token_embeddings(target_vocab)
+        if tokenizer.pad_token_id is not None:
+            base.config.pad_token_id = tokenizer.pad_token_id
+        if tokenizer.eos_token_id is not None:
+            base.config.eos_token_id = tokenizer.eos_token_id
+        if tokenizer.bos_token_id is not None:
+            base.config.bos_token_id = tokenizer.bos_token_id
+
+    return base
+
+
 # ── Model wrapper: GPT-2 + LoRA LLM2Vec-style MNTP ─────────────────────────
 
 class DNAGPTForMNTPLoRA(nn.Module):
@@ -306,12 +336,11 @@ class FullModelCheckpointCallback(TrainerCallback):
 
         from peft import PeftModel
 
-        base = AutoModelForCausalLM.from_pretrained(
+        base = _load_base_for_peft_reload(
             model._base_model_path,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="eager",
+            self.tokenizer,
+            torch.bfloat16,
         )
-        base = patch_to_bidirectional(base)
         merged = PeftModel.from_pretrained(base, adapter_ckpt).merge_and_unload()
         merged.save_pretrained(full_dir)
         self.tokenizer.save_pretrained(full_dir)
@@ -350,12 +379,12 @@ class MNTPTrainerLoRA(Trainer):
             from peft import PeftModel
             dtype  = next(self.model.parameters()).dtype
             device = next(self.model.parameters()).device
-            base = AutoModelForCausalLM.from_pretrained(
+            tokenizer = getattr(self, "processing_class", None)
+            base = _load_base_for_peft_reload(
                 self.model._base_model_path,
-                torch_dtype=dtype,
-                attn_implementation="eager",
+                tokenizer,
+                dtype,
             )
-            base = patch_to_bidirectional(base)
             self.model.peft_model = PeftModel.from_pretrained(base, ckpt).to(device)
             print(f"  Loaded best LoRA checkpoint from: {ckpt}")
 
