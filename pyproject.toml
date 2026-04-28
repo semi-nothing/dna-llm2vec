@@ -24,6 +24,8 @@ dependencies = [
     "genomic-benchmarks>=1.0.0",
     "peft>=0.14.0",
     "einops>=0.8.2",
+    "matplotlib>=3.10.9",
+    "umap-learn>=0.5.12",
 ]
 
 [project.optional-dependencies]
