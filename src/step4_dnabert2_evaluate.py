@@ -74,7 +74,15 @@ def load_model(spec, device: str, dtype):
     # Conservative load path for remote-code encoder models:
     # - disable low_cpu_mem_usage to avoid meta/lazy materialization
     # - disable fast init so tensors are created eagerly
-    # - load in float32 first, then cast/move after full materialization
+    # - keep the whole model in float32 even on GPU
+    #
+    # DNABERT-2's non-flash attention path mixes internal tensors that remain
+    # float32 with attention value tensors that would become bf16/fp16 if we
+    # cast the module to the caller-provided dtype. That later crashes with:
+    #   RuntimeError: expected scalar type BFloat16 but found Float
+    #
+    # For this wrapper, robustness matters more than memory savings, so we keep
+    # DNABERT-2 in fp32 end-to-end.
     model = AutoModel.from_pretrained(
         path,
         config=enc_config,
@@ -86,7 +94,7 @@ def load_model(spec, device: str, dtype):
         torch_dtype=torch.float32,
         device_map=None,
     )
-    model = model.to(device=device, dtype=dtype)
+    model = model.to(device=device)
     model.eval()
 
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
