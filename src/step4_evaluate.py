@@ -267,6 +267,7 @@ def _load_gue_plus(
     crop_bp: int = 4096,
     crop_mode: str = "center",
     filter_non_acgt: bool = False,
+    reverse_order: bool = False,
 ) -> tuple[list[str], list, list[str], list]:
     """Load one GUE+ EPI task from locally downloaded DNABERT-2 files.
 
@@ -310,8 +311,12 @@ def _load_gue_plus(
                 if not seq and "enhancer" in row and "promoter" in row:
                     enhancer = row["enhancer"].strip().upper()
                     promoter = row["promoter"].strip().upper()
-                    seq = enhancer + promoter
-                    anchor = len(enhancer)
+                    if reverse_order:
+                        seq = promoter + enhancer
+                        anchor = len(promoter)
+                    else:
+                        seq = enhancer + promoter
+                        anchor = len(enhancer)
                 seq = _crop_sequence(seq.strip().upper(), crop_bp, crop_mode, anchor)
                 if filter_non_acgt and not _is_acgt(seq):
                     dropped += 1
@@ -356,6 +361,7 @@ def load_benchmark_data(
     crop_bp: int = 4096,
     crop_mode: str = "center",
     filter_non_acgt: bool = False,
+    epi_reverse_order: bool = False,
 ) -> tuple[list[str], list, list[str], list]:
     if source == "gb":
         return _load_gb(task_key)
@@ -370,6 +376,7 @@ def load_benchmark_data(
             crop_bp=crop_bp,
             crop_mode=crop_mode,
             filter_non_acgt=filter_non_acgt,
+            reverse_order=epi_reverse_order,
         )
     else:
         raise ValueError(f"Unknown source '{source}'")
@@ -677,6 +684,11 @@ def parse_args():
              "junction centers on the enhancer/promoter boundary.",
     )
     p.add_argument(
+        "--epi-reverse-order", action="store_true",
+        help="For GUE+ EPI rows that provide separate enhancer/promoter columns, "
+             "concatenate promoter+enhancer instead of enhancer+promoter.",
+    )
+    p.add_argument(
         "--filter-n", action="store_true",
         help="For GUE+ EPI, drop rows whose cropped sequence contains any non-ACGT base.",
     )
@@ -782,11 +794,13 @@ def main():
             crop_bp=args.epi_crop_bp,
             crop_mode=args.epi_crop_mode,
             filter_non_acgt=args.filter_n,
+            epi_reverse_order=args.epi_reverse_order,
         )
         benchmark_data[task_key] = (train_seqs, train_labels, test_seqs, test_labels)
         split_label = "dev" if source in ("gue", "gue+") else "test"
         extra = f"  [{args.epi_crop_mode}-cropped to {args.epi_crop_bp} bp" if source == "gue+" else ""
         if source == "gue+":
+            extra += ", promoter+enhancer" if args.epi_reverse_order else ""
             extra += ", filter-n" if args.filter_n else ""
             extra += "]"
         print(f"       train={len(train_seqs):,}  {split_label}={len(test_seqs):,}{extra}")
