@@ -70,6 +70,13 @@ def parse_args():
     p.add_argument("--subsample", type=int, default=0,
                    help="Optional cap on total plotted EPI test points. 0 = use all.")
     p.add_argument(
+        "--cell-line",
+        default="all",
+        help="Filter to one EPI cell line before visualisation. Use one of: "
+             "all, epi_0, epi_1, epi_2, epi_3, epi_4, epi_5, "
+             "EPI-GM12878, EPI-HeLa-S3, EPI-HUVEC, EPI-IMR90, EPI-K562, EPI-NHEK.",
+    )
+    p.add_argument(
         "--legend-loc",
         default="best",
         help="Matplotlib legend location for each panel.",
@@ -199,6 +206,8 @@ def _load_epi_testset(args):
     task_keys: list[str] = []
 
     for task_key, _, display_name, source in base.GUE_PLUS_EPI_BENCHMARKS:
+        if args.cell_line not in ("all", task_key, display_name):
+            continue
         _, _, test_seqs, test_labels = base.load_benchmark_data(
             task_key,
             source,
@@ -216,6 +225,12 @@ def _load_epi_testset(args):
     labels_np = np.asarray(labels, dtype=np.int64)
     cell_lines_np = np.asarray(cell_lines)
     task_keys_np = np.asarray(task_keys)
+
+    if len(labels_np) == 0:
+        raise ValueError(
+            f"No EPI rows matched --cell-line={args.cell_line!r}. "
+            "Check the value or the available GUE+ EPI files."
+        )
 
     keep = _subsample_indices(labels_np, cell_lines_np, args.subsample, args.seed)
     return {
@@ -293,6 +308,7 @@ def main():
     print(f"  Pooling     : {args.pooling}")
     print(f"  Crop        : {args.epi_crop_bp} bp ({args.epi_crop_mode})")
     print(f"  Reverse     : {args.epi_reverse_order}")
+    print(f"  Cell line   : {args.cell_line}")
     print(f"  Subsample   : {args.subsample or 'all'}")
     if device == "cuda":
         print(f"  GPU         : {torch.cuda.get_device_name(0)}")
@@ -304,7 +320,8 @@ def main():
     labels = epi["labels"]
     cell_lines = epi["cell_lines"]
     task_keys = epi["task_keys"]
-    print(f"  Loaded {len(sequences):,} sequences across {len(base.GUE_PLUS_EPI_BENCHMARKS)} cell lines")
+    n_cell_lines = len(np.unique(cell_lines))
+    print(f"  Loaded {len(sequences):,} sequences across {n_cell_lines} cell line(s)")
     print(f"  Positive rate: {labels.mean() * 100:.2f}%")
 
     os.makedirs(os.path.dirname(args.output_prefix) or ".", exist_ok=True)
@@ -363,6 +380,7 @@ def main():
                     "epi_crop_bp": args.epi_crop_bp,
                     "epi_crop_mode": args.epi_crop_mode,
                     "epi_reverse_order": args.epi_reverse_order,
+                    "cell_line": args.cell_line,
                     "subsample": args.subsample,
                 },
                 "summary": summaries,
