@@ -20,10 +20,10 @@ LoRA-based MNTP with two key improvements over step2_mntp.py:
      consistent with pretraining while using full bidirectional context.
 
 Mask token:
-  Unlike step2_mntp.py, this version avoids resizing the embedding table.
-  Instead, the EOS token is reused as the mask token (analogous to LLM2Vec
-  using underscore '_' for LLaMA/Mistral). This sidesteps weight-tying
-  complications between wte and lm_head when applying LoRA.
+  This version uses a dedicated [MASK] token, matching the non-LoRA MNTP
+  implementation and the standard masked-token replacement formulation.
+  If the GPT-2 tokenizer lacks a mask token, one is added and the base model
+  embedding table is resized before LoRA adapters are attached.
 
 Checkpoint layout:
   <output>/checkpoints/checkpoint-N/   LoRA adapter weights only
@@ -70,7 +70,7 @@ from transformers import (
 from transformers.modeling_outputs import MaskedLMOutput
 
 sys.path.insert(0, os.path.dirname(__file__))
-from data_utils import load_fasta_dataset, load_hub_dataset
+from data_utils import ensure_mask_token, load_fasta_dataset, load_hub_dataset
 from step1_bidirectional import patch_to_bidirectional
 
 
@@ -94,6 +94,7 @@ def build_lora_config(args):
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
         target_modules=["c_attn", "c_proj"],
+        modules_to_save=["wte"],
         lora_dropout=args.lora_dropout,
         bias="none",
         task_type=TaskType.CAUSAL_LM,
@@ -142,7 +143,7 @@ class DNAGPTForMNTPLoRA(nn.Module):
     ) -> MaskedLMOutput:
         """
         Args:
-            input_ids      : (B, T) masked input (EOS replaces masked tokens)
+            input_ids      : (B, T) masked input ([MASK] replaces masked tokens)
             attention_mask : (B, T) 1 real, 0 padding
             labels         : (B, T) original ids at masked positions, -100 elsewhere
 
@@ -518,15 +519,6 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Use EOS token as mask token avoids embedding resize (which breaks
-    # weight tying between wte and lm_head when applying LoRA).
-    # Analogous to LLM2Vec using underscore '_' for LLaMA/Mistral.
-    if tokenizer.mask_token is None:
-        tokenizer.mask_token = tokenizer.eos_token
-        print(f"  Mask token : reusing EOS '{tokenizer.eos_token}' (no embedding resize)")
-    else:
-        print(f"  Mask token : {tokenizer.mask_token}")
-
     # ── 2. Load bidirectional model ───────────────────────────────────────────
     print("\n[2/5] Loading bidirectional model + applying LoRA")
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
@@ -538,6 +530,14 @@ def main():
     )
     base_model = patch_to_bidirectional(base_model)
 
+    # Use a dedicated [MASK] token for MNTP so masked positions are
+    # distinguishable from EOS/padding before LoRA adapters are attached.
+    added_mask = ensure_mask_token(tokenizer, base_model)
+    if added_mask:
+        print(f"  Mask token : added dedicated {tokenizer.mask_token!r}")
+    else:
+        print(f"  Mask token : {tokenizer.mask_token}")
+
     # Build LoRA config and wrap model
     lora_config = build_lora_config(args)
     model = DNAGPTForMNTPLoRA(base_model, lora_config)
@@ -545,6 +545,17 @@ def main():
 
     model = model.to(device)
     model.print_trainable_parameters()
+    mask_token_id = tokenizer.mask_token_id
+    initial_mask_embedding = None
+    if mask_token_id is not None:
+        initial_mask_embedding = (
+            model.peft_model.base_model.model.transformer.wte.weight[mask_token_id]
+            .detach()
+            .float()
+            .cpu()
+            .clone()
+        )
+        print(f"  Mask token id: {mask_token_id}")
 
     # Gradient checkpointing with LoRA requires input gradients to be enabled
     if args.grad_ckpt:
@@ -650,6 +661,22 @@ def main():
 
     train_result = trainer.train(resume_from_checkpoint=resume)
 
+    if initial_mask_embedding is not None and mask_token_id is not None:
+        final_mask_embedding = (
+            model.peft_model.base_model.model.transformer.wte.weight[mask_token_id]
+            .detach()
+            .float()
+            .cpu()
+        )
+        delta = final_mask_embedding - initial_mask_embedding
+        l2_delta = float(torch.norm(delta, p=2).item())
+        max_abs_delta = float(delta.abs().max().item())
+        unchanged = bool(torch.equal(final_mask_embedding, initial_mask_embedding))
+        print("\n[MASK] embedding update check")
+        print(f"  L2 delta      : {l2_delta:.6f}")
+        print(f"  Max abs delta : {max_abs_delta:.6f}")
+        print(f"  Unchanged     : {unchanged}")
+
     # ── Save merge LoRA into base model for step3 compatibility ─────────────
     print(f"\nMerging LoRA and saving to: {args.output}")
     model.save_pretrained(args.output, merge=True)
@@ -667,5 +694,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
