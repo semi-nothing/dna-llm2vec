@@ -314,7 +314,7 @@ def main():
         print(f"  GPU         : {torch.cuda.get_device_name(0)}")
     print("=" * 72)
 
-    print("\n[1/4] Loading EPI dev split")
+    print("\n[1/4] Loading EPI test split")
     epi = _load_epi_testset(args)
     sequences = epi["sequences"]
     labels = epi["labels"]
@@ -391,10 +391,11 @@ def main():
 
     print("\n[4/4] Rendering figure")
     fig = _plot_panels(projections, labels, summaries, args)
+    fig.savefig(f"{args.output_prefix}.pdf", bbox_inches="tight")
     fig.savefig(f"{args.output_prefix}.png", dpi=300, bbox_inches="tight")
 
     print("\nSaved:")
-    print(f"  Figure : {args.output_prefix}.png")
+    print(f"  Figure : {args.output_prefix}.png / .pdf")
     print(f"  Metrics: {args.output_prefix}.json")
     print(f"  Arrays : {args.output_prefix}.npz")
 

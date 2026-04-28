@@ -67,6 +67,13 @@ def parse_args():
                    help="Downsample attention maps to this many bins per axis for plotting.")
     p.add_argument("--head-mode", choices=("mean", "head0"), default="mean",
                    help="How to reduce heads. mean is most stable for paper figures.")
+    p.add_argument("--color-scale",
+                   choices=("global", "robust_global", "panel", "robust_panel"),
+                   default="robust_global",
+                   help="How to choose the heatmap colour scale. robust_* uses a percentile cap "
+                        "to avoid one sharp hotspot making other panels look black.")
+    p.add_argument("--color-percentile", type=float, default=99.5,
+                   help="Percentile used by robust_* colour scaling modes.")
     p.add_argument("--output-prefix", required=True)
     p.add_argument("--title", default="EPI Attention Case Study")
     return p.parse_args()
@@ -267,12 +274,26 @@ def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict
     ncols = len(model_names)
     fig, axes = plt.subplots(nrows, ncols, figsize=(5.5 * ncols, 5 * nrows), squeeze=False)
 
-    vmax = 0.0
-    for model_result in results.values():
-        for ex_key in model_result:
-            vmax = max(vmax, float(model_result[ex_key]["heatmap"].max()))
-    vmax = max(vmax, 1e-6)
+    heatmaps = [
+        np.asarray(model_result[ex_key]["heatmap"], dtype=np.float32)
+        for model_result in results.values()
+        for ex_key in model_result
+    ]
 
+    def _panel_vmax(heatmap: np.ndarray) -> float:
+        if args.color_scale == "panel":
+            return max(float(heatmap.max()), 1e-6)
+        if args.color_scale == "robust_panel":
+            return max(float(np.percentile(heatmap, args.color_percentile)), 1e-6)
+        if args.color_scale == "robust_global":
+            return max(float(np.percentile(np.concatenate([h.ravel() for h in heatmaps]), args.color_percentile)), 1e-6)
+        return max(float(max(h.max() for h in heatmaps)), 1e-6)
+
+    shared_vmax = None
+    if args.color_scale in {"global", "robust_global"}:
+        shared_vmax = _panel_vmax(heatmaps[0])
+
+    im = None
     for col, model_name in enumerate(model_names):
         for row, example in enumerate(examples):
             ex_key = f"label_{example['label']}"
@@ -280,6 +301,7 @@ def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict
             heatmap = item["heatmap"]
             boundary_bin = item["boundary_bin"]
             ax = axes[row, col]
+            vmax = shared_vmax if shared_vmax is not None else _panel_vmax(heatmap)
             im = ax.imshow(heatmap, cmap="magma", vmin=0.0, vmax=vmax, origin="lower")
             ax.axvline(boundary_bin - 0.5, color="cyan", linewidth=1.2, linestyle="--")
             ax.axhline(boundary_bin - 0.5, color="cyan", linewidth=1.2, linestyle="--")
@@ -292,13 +314,18 @@ def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict
             ax.set_xlabel("Key positions")
             ax.set_ylabel("Query positions")
 
-    cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
-    cbar.set_label("Last-layer attention")
+    if im is not None:
+        cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
+        if args.color_scale in {"panel", "robust_panel"}:
+            cbar.set_label("Last-layer attention (panel-scaled)")
+        else:
+            cbar.set_label("Last-layer attention")
 
     order_text = "promoter+enhancer" if args.epi_reverse_order else "enhancer+promoter"
     fig.suptitle(
         f"{args.title}\n"
-        f"{args.task_key} | {args.split} split | crop={args.epi_crop_bp}bp ({args.epi_crop_mode}) | order={order_text}",
+        f"{args.task_key} | {args.split} split | crop={args.epi_crop_bp}bp ({args.epi_crop_mode}) | "
+        f"order={order_text} | scale={args.color_scale}",
         fontsize=13,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.95))
@@ -325,6 +352,7 @@ def main():
     print(f"  Reverse     : {args.epi_reverse_order}")
     print(f"  Head mode   : {args.head_mode}")
     print(f"  Downsample  : {args.downsample_bins}")
+    print(f"  Color scale : {args.color_scale} (p={args.color_percentile:g})")
     if device == "cuda":
         print(f"  GPU         : {torch.cuda.get_device_name(0)}")
     print("=" * 72)
@@ -405,6 +433,8 @@ def main():
             "epi_reverse_order": args.epi_reverse_order,
             "head_mode": args.head_mode,
             "downsample_bins": args.downsample_bins,
+            "color_scale": args.color_scale,
+            "color_percentile": args.color_percentile,
             "positive_index": args.positive_index,
             "negative_index": args.negative_index,
             "max_length": args.max_length,
