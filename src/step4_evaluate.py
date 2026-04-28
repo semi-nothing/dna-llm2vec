@@ -465,7 +465,16 @@ def encode_sequences(
                     input_ids=enc["input_ids"],
                     attention_mask=enc["attention_mask"],
                 )
-            hidden = out.last_hidden_state                            # (B, T, D)
+            if hasattr(out, "last_hidden_state"):
+                hidden = out.last_hidden_state
+            elif isinstance(out, tuple):
+                hidden = out[0]
+            else:
+                raise TypeError(
+                    f"Unsupported model output type {type(out)!r}; "
+                    "expected an object with last_hidden_state or a tuple whose "
+                    "first element is hidden states."
+                )
             pooled = pool_hidden_states(
                 hidden=hidden,
                 attention_mask=enc["attention_mask"],
