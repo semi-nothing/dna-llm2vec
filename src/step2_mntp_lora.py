@@ -317,6 +317,14 @@ class FullModelCheckpointCallback(TrainerCallback):
         self.tokenizer = tokenizer
         self.every_steps = every_steps
 
+    @staticmethod
+    def _is_complete_full_checkpoint(path: str) -> bool:
+        required = [
+            "config.json",
+            "tokenizer.json",
+        ]
+        return os.path.isdir(path) and all(os.path.exists(os.path.join(path, f)) for f in required)
+
     def on_save(self, args, state, control, model=None, **kwargs):
         if model is None or self.every_steps <= 0:
             return control
@@ -328,23 +336,35 @@ class FullModelCheckpointCallback(TrainerCallback):
             return control
 
         full_dir = os.path.join(self.output_root, "full_models", f"checkpoint-{state.global_step}")
-        if os.path.isdir(full_dir):
+        if self._is_complete_full_checkpoint(full_dir):
             return control
 
+        tmp_dir = f"{full_dir}.tmp"
+        if os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        if os.path.isdir(full_dir):
+            print(f"  Found incomplete full model export at step {state.global_step}; rebuilding {full_dir}")
+            shutil.rmtree(full_dir, ignore_errors=True)
+
         print(f"  Exporting merged full model at step {state.global_step} -> {full_dir}")
-        os.makedirs(full_dir, exist_ok=True)
+        os.makedirs(tmp_dir, exist_ok=True)
 
         from peft import PeftModel
 
-        base = _load_base_for_peft_reload(
-            model._base_model_path,
-            self.tokenizer,
-            torch.bfloat16,
-        )
-        merged = PeftModel.from_pretrained(base, adapter_ckpt).merge_and_unload()
-        merged.save_pretrained(full_dir)
-        self.tokenizer.save_pretrained(full_dir)
-        del merged, base
+        try:
+            base = _load_base_for_peft_reload(
+                model._base_model_path,
+                self.tokenizer,
+                torch.bfloat16,
+            )
+            merged = PeftModel.from_pretrained(base, adapter_ckpt).merge_and_unload()
+            merged.save_pretrained(tmp_dir)
+            self.tokenizer.save_pretrained(tmp_dir)
+            os.replace(tmp_dir, full_dir)
+            del merged, base
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
         return control
 
 
