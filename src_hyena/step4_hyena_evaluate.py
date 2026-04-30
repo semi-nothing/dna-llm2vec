@@ -17,7 +17,13 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
 import step4_evaluate as base  # noqa: E402
 
-from common import count_parameters_m, load_hyena_backbone, load_hyena_tokenizer  # noqa: E402
+from common import (  # noqa: E402
+    count_parameters_m,
+    ensure_attention_mask,
+    extract_hidden_states,
+    load_hyena_backbone,
+    load_hyena_tokenizer,
+)
 
 
 _generic_load_model = base.load_model
@@ -62,28 +68,19 @@ def encode_sequences(
                 return_tensors="pt",
             )
             enc = {k: v.to(device) for k, v in enc.items()}
+            attention_mask = ensure_attention_mask(enc, tokenizer.pad_token_id)
 
             out = model(
                 input_ids=enc["input_ids"],
-                attention_mask=enc["attention_mask"],
                 output_hidden_states=True,
+                return_dict=True,
             )
 
-            if hasattr(out, "last_hidden_state") and out.last_hidden_state is not None:
-                hidden = out.last_hidden_state
-            elif hasattr(out, "hidden_states") and out.hidden_states is not None:
-                hidden = out.hidden_states[-1]
-            elif isinstance(out, tuple):
-                hidden = out[0]
-            else:
-                raise TypeError(
-                    f"Unsupported HyenaDNA output type {type(out)!r}; "
-                    "expected last_hidden_state, hidden_states, or tuple output."
-                )
+            hidden = extract_hidden_states(out)
 
             pooled = base.pool_hidden_states(
                 hidden=hidden,
-                attention_mask=enc["attention_mask"],
+                attention_mask=attention_mask,
                 input_ids=enc["input_ids"],
                 pooling=pooling,
                 eos_token_id=tokenizer.eos_token_id,
