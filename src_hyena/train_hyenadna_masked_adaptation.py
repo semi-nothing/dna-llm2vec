@@ -133,11 +133,11 @@ def build_training_args(args) -> TrainingArguments:
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
-        dataloader_num_workers=0,
+        dataloader_num_workers=args.dataloader_num_workers,
         dataloader_pin_memory=torch.cuda.is_available(),
         remove_unused_columns=False,
         prediction_loss_only=True,
-        report_to="none",
+        report_to=args.report_to,
         seed=args.seed,
         run_name=args.run_name,
         bf16=bf16_ok,
@@ -339,6 +339,8 @@ def parse_args():
     p.add_argument("--logging-steps", type=int, default=50)
     p.add_argument("--save-steps", type=int, default=500)
     p.add_argument("--eval-steps", type=int, default=500)
+    p.add_argument("--dataloader-num-workers", type=int, default=4)
+    p.add_argument("--report-to", default="wandb", choices=["none", "wandb"])
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--run-name", default="hyena_step2_masked_adaptation")
     return p.parse_args()
@@ -374,6 +376,8 @@ def main():
     print(f"  Train mode               : {args.train_mode}")
     print(f"  Masking mode             : {args.masking_mode}")
     print(f"  Mask probability         : {args.mask_probability}")
+    print(f"  Dataloader workers       : {args.dataloader_num_workers}")
+    print(f"  Report to                : {args.report_to}")
     if args.masking_mode == "span":
         print(f"  Span length range        : {args.span_min_length}-{args.span_max_length}")
 
