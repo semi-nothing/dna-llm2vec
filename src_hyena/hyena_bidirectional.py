@@ -3,8 +3,11 @@ Architecture-specific bidirectional patching utilities for HyenaDNA.
 
 This does NOT remove a Transformer attention mask. Instead, it converts
 the causal Hyena sequence-mixing operator into a bidirectional receptive-field
-version by switching the FFT-convolution padding scheme, following the
-experimental implementation described in the official HyenaDNA repository.
+version by patching both:
+  1. the implicit long filter FFT convolution, and
+  2. the local short depthwise convolution path,
+following the experimental implementation described in the official
+HyenaDNA repository.
 """
 
 from __future__ import annotations
@@ -28,27 +31,38 @@ class HyenaBidirectionalReport:
 
 def hyena_fftconv_bidirectional(u: torch.Tensor, k: torch.Tensor, D: torch.Tensor) -> torch.Tensor:
     """
-    Bidirectional Hyena FFT convolution following the official experimental
-    implementation: pad half the sequence before and half after, then crop
-    back to the original length after inverse FFT.
+    Bidirectional Hyena FFT convolution built from two tied directional paths:
+      1. the original causal convolution, and
+      2. the same convolution applied to the reversed sequence and flipped back.
+
+    Averaging the two preserves the learned causal filter while making the
+    receptive field explicitly bidirectional.
     """
-    seqlen = u.shape[-1]
-    fft_size = 2 * seqlen
+    def _fftconv_causal(u_causal: torch.Tensor, k_causal: torch.Tensor, d_causal: torch.Tensor) -> torch.Tensor:
+        seqlen = u_causal.shape[-1]
+        fft_size = 2 * seqlen
 
-    k_f = torch.fft.rfft(k.to(torch.float32), n=fft_size) / fft_size
+        work_dtype = torch.float32
+        u_work = u_causal.to(work_dtype)
+        k_work = k_causal.to(work_dtype)
+        d_work = d_causal.to(work_dtype)
 
-    padded_length = seqlen + 2 * (seqlen // 2)
-    pad_before = padded_length // 2 - (seqlen // 2)
-    pad_after = padded_length - seqlen - pad_before
-    padded_u = F.pad(u, (pad_before, pad_after), mode="constant", value=0)
-    u_f = torch.fft.rfft(padded_u.to(dtype=k.dtype), n=fft_size)
+        k_f = torch.fft.rfft(k_work, n=fft_size) / fft_size
+        u_f = torch.fft.rfft(u_work, n=fft_size)
 
-    if len(u.shape) > 3:
-        k_f = k_f.unsqueeze(1)
+        if len(u_causal.shape) > 3:
+            k_f = k_f.unsqueeze(1)
 
-    y = torch.fft.irfft(u_f * k_f, n=fft_size, norm="forward")[..., :seqlen]
-    out = y + u * D.unsqueeze(-1)
-    return out.to(dtype=u.dtype)
+        y = torch.fft.irfft(u_f * k_f, n=fft_size, norm="forward")[..., :seqlen]
+        out = y + u_work * d_work.unsqueeze(-1)
+        return out.to(dtype=u_causal.dtype)
+
+    forward = _fftconv_causal(u, k, D)
+    backward = torch.flip(
+        _fftconv_causal(torch.flip(u, dims=[-1]), k, D),
+        dims=[-1],
+    )
+    return 0.5 * (forward + backward)
 
 
 def _is_hyena_filter_module(module) -> bool:
@@ -60,6 +74,21 @@ def _is_hyena_filter_module(module) -> bool:
             and hasattr(module, "bias")
             and hasattr(module, "implicit_filter")
             and hasattr(module, "pos_emb")
+        )
+    )
+
+
+def _is_hyena_operator_module(module) -> bool:
+    type_name = type(module).__name__.lower()
+    return (
+        "hyenaoperator" in type_name
+        or (
+            hasattr(module, "short_filter")
+            and hasattr(module, "filter_fn")
+            and hasattr(module, "in_proj")
+            and hasattr(module, "out_proj")
+            and hasattr(module, "order")
+            and hasattr(module, "d_model")
         )
     )
 
@@ -80,6 +109,40 @@ def _hyena_filter_forward_bidirectional(self, x, L, k=None, bias=None, *args, **
     return hyena_fftconv_bidirectional(x, k, bias)
 
 
+def _short_filter_bidirectional(conv, u: torch.Tensor, target_len: int) -> torch.Tensor:
+    """
+    Apply tied forward/backward local depthwise convolutions and average them,
+    yielding an explicitly bidirectional local receptive field.
+    """
+    forward = conv(u)[..., :target_len]
+    backward = torch.flip(
+        conv(torch.flip(u, dims=[-1]))[..., :target_len],
+        dims=[-1],
+    )
+    return 0.5 * (forward + backward)
+
+
+def _hyena_operator_forward_bidirectional(self, u):
+    l = u.size(-2)
+    l_filter = min(l, self.l_max)
+    u = self.in_proj(u).transpose(1, 2)
+
+    uc = _short_filter_bidirectional(self.short_filter, u, l_filter)
+    *x, v = uc.split(self.d_model, dim=1)
+
+    k = self.filter_fn.filter(l_filter)[0]
+    k = k.transpose(0, 1).reshape(self.order - 1, self.d_model, l_filter)
+    bias = self.filter_fn.bias.reshape(self.order - 1, self.d_model)
+
+    for o, x_i in enumerate(reversed(x[1:])):
+        v = self.dropout(v * x_i)
+        v = self.filter_fn(v, l_filter, k=k[o], bias=bias[o])
+
+    y = (v * x[0]).transpose(1, 2)
+    y = self.out_proj(y)
+    return y
+
+
 def make_hyenadna_bidirectional(model):
     """
     Convert a pretrained causal HyenaDNA checkpoint into an H1-style
@@ -94,23 +157,32 @@ def make_hyenadna_bidirectional(model):
     modules_with_bidir_attr = 0
     modules_with_bidir_true = 0
     modules_forward_patched = 0
+    total_operators = 0
+    operator_forward_patched = 0
 
     for _, module in model.named_modules():
-        if not _is_hyena_filter_module(module):
+        if _is_hyena_filter_module(module):
+            total_filters += 1
+
+            if hasattr(module, "bidirectional"):
+                modules_with_bidir_attr += 1
+            setattr(module, "bidirectional", True)
+            modules_with_bidir_true += 1
+
+            if not getattr(module, "_hyena_bidirectional_forward_patched", False):
+                module._hyena_original_forward = module.forward
+                module.forward = types.MethodType(_hyena_filter_forward_bidirectional, module)
+                module._hyena_bidirectional_forward_patched = True
+            modules_forward_patched += 1
             continue
 
-        total_filters += 1
-
-        if hasattr(module, "bidirectional"):
-            modules_with_bidir_attr += 1
-        setattr(module, "bidirectional", True)
-        modules_with_bidir_true += 1
-
-        if not getattr(module, "_hyena_bidirectional_forward_patched", False):
-            module._hyena_original_forward = module.forward
-            module.forward = types.MethodType(_hyena_filter_forward_bidirectional, module)
-            module._hyena_bidirectional_forward_patched = True
-        modules_forward_patched += 1
+        if _is_hyena_operator_module(module):
+            total_operators += 1
+            if not getattr(module, "_hyena_bidirectional_operator_forward_patched", False):
+                module._hyena_operator_original_forward = module.forward
+                module.forward = types.MethodType(_hyena_operator_forward_bidirectional, module)
+                module._hyena_bidirectional_operator_forward_patched = True
+            operator_forward_patched += 1
 
     if total_filters == 0:
         raise RuntimeError(
@@ -121,6 +193,15 @@ def make_hyenadna_bidirectional(model):
             "make_hyenadna_bidirectional() did not fully patch all HyenaFilter modules.\n"
             f"total_filters={total_filters}, bidirectional_true={modules_with_bidir_true}, "
             f"forward_patched={modules_forward_patched}"
+        )
+    if total_operators == 0:
+        raise RuntimeError(
+            "make_hyenadna_bidirectional() did not find any HyenaOperator-like modules to patch."
+        )
+    if operator_forward_patched != total_operators:
+        raise RuntimeError(
+            "make_hyenadna_bidirectional() did not fully patch all HyenaOperator modules.\n"
+            f"total_operators={total_operators}, forward_patched={operator_forward_patched}"
         )
 
     return model

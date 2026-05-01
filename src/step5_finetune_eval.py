@@ -394,6 +394,7 @@ def train_one_task(
     """
     from sklearn.preprocessing import LabelEncoder
     from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef
+    from sklearn.model_selection import train_test_split
 
     # Encode integer labels (handle string labels from GB)
     le      = LabelEncoder()
@@ -401,9 +402,23 @@ def train_one_task(
     test_y  = le.transform(test_labels)
     n_cls   = len(le.classes_)
 
+    if source in ("gb", "nt"):
+        stratify = train_y if len(set(train_y)) > 1 else None
+        fit_seqs, val_seqs, fit_y, val_y = train_test_split(
+            train_seqs,
+            train_y,
+            test_size=0.1,
+            random_state=args.seed,
+            stratify=stratify,
+        )
+    else:
+        fit_seqs, fit_y = train_seqs, train_y
+        val_seqs, val_y = test_seqs, test_y
+
     # Build datasets
-    train_ds = SeqDataset(train_seqs, train_y, tokenizer, args.max_length)
-    test_ds  = SeqDataset(test_seqs,  test_y,  tokenizer, args.max_length)
+    train_ds = SeqDataset(fit_seqs, fit_y, tokenizer, args.max_length)
+    val_ds   = SeqDataset(val_seqs, val_y, tokenizer, args.max_length)
+    test_ds  = SeqDataset(test_seqs, test_y, tokenizer, args.max_length)
     pad_id   = tokenizer.pad_token_id
     collate  = lambda b: _collate_fn(b, pad_id)
     generator = torch.Generator()
@@ -411,6 +426,9 @@ def train_one_task(
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                           num_workers=0, pin_memory=(device == "cuda"),
                           collate_fn=collate, generator=generator)
+    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False,
+                          num_workers=0, pin_memory=(device == "cuda"),
+                          collate_fn=collate)
     test_dl  = DataLoader(test_ds,  batch_size=args.batch_size, shuffle=False,
                           num_workers=0, pin_memory=(device == "cuda"),
                           collate_fn=collate)
@@ -440,8 +458,7 @@ def train_one_task(
     scheduler   = get_cosine_schedule_with_warmup(optimizer, warmup, total_steps)
 
     best_metric = -float("inf")
-    best_preds  = None
-    best_labels = None
+    best_state  = None
 
     for epoch in range(args.epochs):
         # ── train ──────────────────────────────────────────────────────────
@@ -472,7 +489,7 @@ def train_one_task(
         classifier.eval()
         all_preds, all_labels = [], []
         with torch.inference_mode():
-            for batch in test_dl:
+            for batch in val_dl:
                 input_ids      = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 labels         = batch["labels"].to(device)
@@ -483,27 +500,42 @@ def train_one_task(
                 del input_ids, attention_mask, labels, logits, preds
 
         f1  = f1_score(all_labels, all_preds, average="macro")
-        # Use F1 as the primary tracking metric for all tasks
-        # (accuracy for GB/NT will be computed at the end from best_preds)
-        if f1 > best_metric:
-            best_metric = f1
-            best_preds  = list(all_preds)
-            best_labels = list(all_labels)
+        acc = accuracy_score(all_labels, all_preds)
+        metric = f1 if source in ("gue", "gue+") else acc
+        if metric > best_metric:
+            best_metric = metric
+            best_state = copy.deepcopy(classifier.state_dict())
 
         primary = "F1" if source in ("gue", "gue+") else "acc"
-        pval    = f1 if source in ("gue", "gue+") else accuracy_score(all_labels, all_preds)
+        pval    = metric
         print(f"    epoch {epoch+1:02d}/{args.epochs}  "
               f"loss={avg_loss:.4f}  {primary}={pval*100:.2f}%")
 
-    # ── final metrics from best checkpoint (best F1 epoch) ─────────────
-    acc = float(accuracy_score(best_labels, best_preds))
-    f1  = float(f1_score(best_labels, best_preds, average="macro"))
-    mcc = float(matthews_corrcoef(best_labels, best_preds))
+    if best_state is not None:
+        classifier.load_state_dict(best_state)
+
+    # ── final metrics on the held-out evaluation split ──────────────────
+    classifier.eval()
+    all_preds, all_labels = [], []
+    with torch.inference_mode():
+        for batch in test_dl:
+            input_ids      = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels         = batch["labels"].to(device)
+            logits = classifier(input_ids, attention_mask)
+            preds  = logits.argmax(dim=-1)
+            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(labels.cpu().tolist())
+            del input_ids, attention_mask, labels, logits, preds
+
+    acc = float(accuracy_score(all_labels, all_preds))
+    f1  = float(f1_score(all_labels, all_preds, average="macro"))
+    mcc = float(matthews_corrcoef(all_labels, all_preds))
 
     # Cleanup VRAM between tasks
     del classifier, backbone, optimizer, scheduler, trainable
-    del train_dl, test_dl, train_ds, test_ds, generator
-    del all_preds, all_labels, best_preds, best_labels, le, train_y, test_y
+    del train_dl, val_dl, test_dl, train_ds, val_ds, test_ds, generator
+    del all_preds, all_labels, best_state, le, train_y, test_y, fit_y, val_y
     gc.collect()
     if device == "cuda":
         torch.cuda.empty_cache()

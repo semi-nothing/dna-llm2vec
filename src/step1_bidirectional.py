@@ -203,9 +203,8 @@ def sanity_check(model_name: str, device: str, tokenizer):
 
     Expected result:
       - Hidden states DIFFER between causal and bidirectional models.
-      - The LAST token's hidden state should differ the most (it already
-        had full left context in the causal model, so earlier tokens
-        show a bigger change).
+      - Per-token differences should be non-zero for at least part of the
+        sequence, indicating that the attention pattern changed.
     """
     print("\n[3/4] Sanity check")
 
@@ -245,7 +244,9 @@ def sanity_check(model_name: str, device: str, tokenizer):
         print("  Result : WARN — hidden states are identical.")
         print("           The patch may not have taken effect.")
 
-    # Per-token diff to show positional effect
+    # Per-token diff provides a qualitative view of where the patch changes
+    # representations; we print it for inspection rather than enforcing a
+    # specific positional pattern.
     per_token = diff[0].mean(dim=-1)  # shape (T,)
     tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
     print("\n  Per-token mean diff:")

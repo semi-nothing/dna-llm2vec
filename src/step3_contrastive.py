@@ -67,6 +67,7 @@ import argparse
 import math
 import os
 import random
+import json
 import sys
 import time
 from dataclasses import dataclass
@@ -411,6 +412,39 @@ class DNAGPTForContrastive(nn.Module):
             # Always restore backbone to original device (even if save fails)
             self.gpt2.to(original_device)
 
+        self._save_projection_head(save_dir)
+
+    def _save_projection_head(self, save_dir: str):
+        proj_state_path = os.path.join(save_dir, "contrastive_head.pt")
+        payload = {
+            "temperature": self.temperature,
+            "mode": self.mode,
+            "embed_dim": self.embed_dim,
+            "has_projection": self.proj is not None,
+        }
+        if self.proj is not None:
+            payload["projection_state_dict"] = self.proj.state_dict()
+        torch.save(payload, proj_state_path)
+
+    def load_projection_head(self, load_dir: str, map_location=None):
+        proj_state_path = os.path.join(load_dir, "contrastive_head.pt")
+        if not os.path.isfile(proj_state_path):
+            return False
+
+        payload = torch.load(proj_state_path, map_location=map_location or "cpu")
+        has_projection = bool(payload.get("has_projection", False))
+
+        if has_projection != (self.proj is not None):
+            raise RuntimeError(
+                "Projection-head mismatch while loading contrastive checkpoint.\n"
+                f"  checkpoint has_projection={has_projection}\n"
+                f"  current model has_projection={self.proj is not None}"
+            )
+
+        if self.proj is not None:
+            self.proj.load_state_dict(payload["projection_state_dict"])
+        return True
+
 
 # ── Custom Trainer ────────────────────────────────────────────────────────────
 
@@ -453,6 +487,7 @@ class ContrastiveTrainer(Trainer):
             temperature=self._contrastive_temp,
             mode=self._contrastive_mode,
         ).to(device)
+        new_model.load_projection_head(ckpt, map_location=device)
         self.model.gpt2   = new_model.gpt2
         self.model.pooler = new_model.pooler
         if new_model.proj is not None:
@@ -584,6 +619,7 @@ class ContrastiveMetricsCallback(TrainerCallback):
 # ── Training arguments ────────────────────────────────────────────────────────
 
 def build_training_args(args) -> TrainingArguments:
+    bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
     return TrainingArguments(
         output_dir=args.output,
         num_train_epochs=args.epochs,
@@ -594,8 +630,8 @@ def build_training_args(args) -> TrainingArguments:
         warmup_ratio=0.06,
         weight_decay=0.01,
         lr_scheduler_type="cosine",
-        bf16=True,
-        bf16_full_eval=True,
+        bf16=bf16_ok,
+        bf16_full_eval=bf16_ok,
         gradient_checkpointing=args.grad_ckpt,   # trade ~30% speed for ~60% less activation VRAM
         torch_compile=args.compile,
         dataloader_num_workers=4,
@@ -816,6 +852,7 @@ def main():
             temperature=args.temperature,
             mode=args.mode,
         )
+        new_wrap.load_projection_head(resume, map_location="cpu")
         model.gpt2   = new_wrap.gpt2.to(next(model.parameters()).device)
         model.pooler = new_wrap.pooler
         if new_wrap.proj is not None and model.proj is not None:

@@ -1,14 +1,15 @@
 """
-Step 2 for the HyenaDNA branch: masked nucleotide / span adaptation.
+Step 2 for the HyenaDNA branch: span-masked MNTP adaptation.
 
 H0: pretrained causal HyenaDNA baseline
 H1: pretrained weights + bidirectional Hyena receptive-field patch
-H2: H1 adapted with masked nucleotide/span prediction
+H2: H1 adapted with span-masked next-token prediction (LLM2Vec-style shift)
 """
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 import random
 import sys
@@ -65,6 +66,17 @@ class SyntheticDNADataset(TorchDataset):
 
 
 class HyenaDNAForMaskedAdaptation(nn.Module):
+    """
+    Wrap HyenaDNA for span-masked MNTP.
+
+    The masking policy may hide single positions or contiguous spans, but the
+    supervision follows the LLM2Vec-style shifted objective:
+      logits[:, i-1] predict labels[:, i]
+
+    This keeps the prediction interface aligned with causal pretraining while
+    using bidirectional context to recover masked characters/spans.
+    """
+
     _keys_to_ignore_on_save = None
 
     def __init__(self, base_model):
@@ -81,6 +93,7 @@ class HyenaDNAForMaskedAdaptation(nn.Module):
     ) -> MaskedLMOutput:
         out = self.base_model(
             input_ids=input_ids,
+            attention_mask=attention_mask,
             output_hidden_states=False,
             return_dict=True,
         )
@@ -88,9 +101,13 @@ class HyenaDNAForMaskedAdaptation(nn.Module):
 
         loss = None
         if labels is not None:
+            # LLM2Vec-style MNTP shift: use position i-1 to predict the masked
+            # token at position i. labels are -100 at non-masked positions.
+            logits_s = logits[:, :-1, :].contiguous()
+            labels_s = labels[:, 1:].contiguous()
             loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                labels.view(-1),
+                logits_s.view(-1, logits_s.size(-1)),
+                labels_s.view(-1),
                 ignore_index=-100,
             )
 
@@ -98,6 +115,30 @@ class HyenaDNAForMaskedAdaptation(nn.Module):
 
     def save_pretrained(self, save_dir: str):
         save_hyena_checkpoint(self.base_model, None, save_dir)
+
+
+class HyenaTrainer(Trainer):
+    """
+    Trainer variant that avoids the default shared-tensor safetensors path.
+    """
+
+    def _save(self, output_dir: Optional[str] = None, state_dict=None):
+        output_dir = output_dir or self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        model_to_save = self.model
+        if hasattr(model_to_save, "module"):
+            model_to_save = model_to_save.module
+
+        if hasattr(model_to_save, "save_pretrained"):
+            model_to_save.save_pretrained(output_dir)
+        else:
+            torch.save(model_to_save.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
+
+        if self.processing_class is not None and hasattr(self.processing_class, "save_pretrained"):
+            self.processing_class.save_pretrained(output_dir)
+
+        torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
 
 
 def build_training_args(args) -> TrainingArguments:
@@ -109,7 +150,7 @@ def build_training_args(args) -> TrainingArguments:
         eval_strategy = "epoch"
         save_strategy = "epoch"
 
-    return TrainingArguments(
+    kwargs = dict(
         output_dir=os.path.join(args.output, "trainer_state"),
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
@@ -144,6 +185,9 @@ def build_training_args(args) -> TrainingArguments:
         bf16_full_eval=bf16_ok,
         gradient_checkpointing=False,
     )
+    if "save_safetensors" in inspect.signature(TrainingArguments.__init__).parameters:
+        kwargs["save_safetensors"] = False
+    return TrainingArguments(**kwargs)
 
 
 def _clean_sequence(seq: str) -> str:
@@ -253,7 +297,7 @@ def load_hyena_text_dataset(
 def smoke_test(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("=" * 72)
-    print("HyenaDNA  |  Step 2 Smoke Test")
+    print("HyenaDNA  |  Step 2 Smoke Test (Span-Masked MNTP)")
     print("=" * 72)
 
     tokenizer = load_hyena_tokenizer(args.model)
@@ -294,8 +338,8 @@ def smoke_test(args):
     out = wrapper(**batch)
     loss = out.loss
     if loss is None:
-        raise RuntimeError("Smoke test failed: masked adaptation loss is None.")
-    print(f"  One-step masked loss      : {loss.item():.6f}")
+        raise RuntimeError("Smoke test failed: span-masked MNTP loss is None.")
+    print(f"  One-step MNTP loss        : {loss.item():.6f}")
     loss.backward()
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
@@ -308,7 +352,7 @@ def smoke_test(args):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="HyenaDNA Step 2: masked nucleotide/span adaptation")
+    p = argparse.ArgumentParser(description="HyenaDNA Step 2: span-masked MNTP adaptation")
     p.add_argument("--model", default=DEFAULT_HYENA_MODEL, help="H0 or H1 checkpoint / model id")
     p.add_argument("--output", default="./hyena_h2_masked_adapted")
 
@@ -342,7 +386,7 @@ def parse_args():
     p.add_argument("--dataloader-num-workers", type=int, default=4)
     p.add_argument("--report-to", default="wandb", choices=["none", "wandb"])
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--run-name", default="hyena_step2_masked_adaptation")
+    p.add_argument("--run-name", default="hyena_step2_span_masked_mntp")
     return p.parse_args()
 
 
@@ -367,7 +411,7 @@ def main():
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
 
     print("=" * 72)
-    print("HyenaDNA  |  Step 2: Masked Nucleotide / Span Adaptation")
+    print("HyenaDNA  |  Step 2: Span-Masked MNTP Adaptation")
     print("=" * 72)
     print(f"  Input model              : {args.model}")
     print(f"  Output                   : {args.output}")
@@ -376,6 +420,7 @@ def main():
     print(f"  Train mode               : {args.train_mode}")
     print(f"  Masking mode             : {args.masking_mode}")
     print(f"  Mask probability         : {args.mask_probability}")
+    print("  Objective                : span-masked MNTP (LLM2Vec-style shift)")
     print(f"  Dataloader workers       : {args.dataloader_num_workers}")
     print(f"  Report to                : {args.report_to}")
     if args.masking_mode == "span":
@@ -442,7 +487,7 @@ def main():
     os.makedirs(args.output, exist_ok=True)
     training_args = build_training_args(args)
 
-    trainer = Trainer(
+    trainer = HyenaTrainer(
         model=wrapper,
         args=training_args,
         train_dataset=datasets["train"],
@@ -450,7 +495,7 @@ def main():
         data_collator=collator,
     )
 
-    print("\n[2/4] Training masked adaptation")
+    print("\n[2/4] Training span-masked MNTP adaptation")
     trainer.train()
 
     print("\n[3/4] Saving H2 checkpoint")

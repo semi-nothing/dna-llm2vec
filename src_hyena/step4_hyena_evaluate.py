@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "src"))
 import step4_evaluate as base  # noqa: E402
 
 from common import (  # noqa: E402
@@ -27,6 +28,7 @@ from common import (  # noqa: E402
 
 
 _generic_load_model = base.load_model
+_generic_encode_sequences = base.encode_sequences
 
 
 def load_model(spec, device: str, dtype):
@@ -37,7 +39,8 @@ def load_model(spec, device: str, dtype):
     print(f"  Loading {spec.name}  ({path}, mode={spec.mode}, hyena-wrapper)")
 
     tokenizer = load_hyena_tokenizer(path)
-    model, load_path = load_hyena_backbone(path, device=device)
+    model, load_path = load_hyena_backbone(path, device=device, dtype=dtype)
+    setattr(model, "_hyena_eval_wrapper", True)
 
     print(f"    Load path  : {load_path}")
     print(f"    Parameters : {count_parameters_m(model):.1f}M  |  vocab: {len(tokenizer):,}")
@@ -54,6 +57,18 @@ def encode_sequences(
     pooling: str = "mean",
     desc: str = "Encoding",
 ) -> np.ndarray:
+    if not getattr(model, "_hyena_eval_wrapper", False):
+        return _generic_encode_sequences(
+            model=model,
+            tokenizer=tokenizer,
+            sequences=sequences,
+            batch_size=batch_size,
+            max_length=max_length,
+            device=device,
+            pooling=pooling,
+            desc=desc,
+        )
+
     model.eval()
     all_embeddings = []
 
@@ -72,6 +87,7 @@ def encode_sequences(
 
             out = model(
                 input_ids=enc["input_ids"],
+                attention_mask=attention_mask,
                 output_hidden_states=True,
                 return_dict=True,
             )

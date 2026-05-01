@@ -365,10 +365,11 @@ def train_one_task(
 ) -> dict:
     """
     Fine-tune a fresh full backbone copy of base_model on one task.
-    Returns best-dev metrics selected by the configured early-stop monitor.
+    Returns held-out evaluation metrics after model selection on validation.
     """
     from sklearn.preprocessing import LabelEncoder
     from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef
+    from sklearn.model_selection import train_test_split
 
     # Encode integer labels (handle string labels from GB)
     le      = LabelEncoder()
@@ -376,9 +377,23 @@ def train_one_task(
     test_y  = le.transform(test_labels)
     n_cls   = len(le.classes_)
 
+    if source in ("gb", "nt"):
+        stratify = train_y if len(set(train_y)) > 1 else None
+        fit_seqs, val_seqs, fit_y, val_y = train_test_split(
+            train_seqs,
+            train_y,
+            test_size=0.1,
+            random_state=args.seed,
+            stratify=stratify,
+        )
+    else:
+        fit_seqs, fit_y = train_seqs, train_y
+        val_seqs, val_y = test_seqs, test_y
+
     # Build datasets
-    train_ds = SeqDataset(train_seqs, train_y, tokenizer, args.max_length)
-    test_ds  = SeqDataset(test_seqs,  test_y,  tokenizer, args.max_length)
+    train_ds = SeqDataset(fit_seqs, fit_y, tokenizer, args.max_length)
+    val_ds   = SeqDataset(val_seqs, val_y, tokenizer, args.max_length)
+    test_ds  = SeqDataset(test_seqs, test_y, tokenizer, args.max_length)
     pad_id   = tokenizer.pad_token_id
     collate  = lambda b: _collate_fn(b, pad_id)
     generator = torch.Generator()
@@ -386,6 +401,9 @@ def train_one_task(
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                           num_workers=0, pin_memory=(device == "cuda"),
                           collate_fn=collate, generator=generator)
+    val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False,
+                          num_workers=0, pin_memory=(device == "cuda"),
+                          collate_fn=collate)
     test_dl  = DataLoader(test_ds,  batch_size=args.batch_size, shuffle=False,
                           num_workers=0, pin_memory=(device == "cuda"),
                           collate_fn=collate)
@@ -419,13 +437,9 @@ def train_one_task(
 
     monitor_name = args.monitor
     best_metric = -float("inf")
-    best_preds = None
-    best_labels = None
+    best_state = None
     best_epoch = 0
     epochs_without_improvement = 0
-    last_preds = None
-    last_labels = None
-    last_epoch = 0
 
     for epoch in range(args.epochs):
         # ── train ──────────────────────────────────────────────────────────
@@ -456,7 +470,7 @@ def train_one_task(
         classifier.eval()
         all_preds, all_labels = [], []
         with torch.inference_mode():
-            for batch in test_dl:
+            for batch in val_dl:
                 input_ids      = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 labels         = batch["labels"].to(device)
@@ -471,15 +485,11 @@ def train_one_task(
         mcc = float(matthews_corrcoef(all_labels, all_preds))
         metrics = {"accuracy": acc, "f1": f1, "mcc": mcc}
         monitor_val = metrics[monitor_name]
-        last_preds = list(all_preds)
-        last_labels = list(all_labels)
-        last_epoch = epoch + 1
 
         improved = monitor_val > (best_metric + args.min_delta)
         if improved:
             best_metric = monitor_val
-            best_preds = list(all_preds)
-            best_labels = list(all_labels)
+            best_state = copy.deepcopy(classifier.state_dict())
             best_epoch = epoch + 1
             epochs_without_improvement = 0
         else:
@@ -495,29 +505,33 @@ def train_one_task(
                   f"(best {monitor_name} at epoch {best_epoch:02d})")
             break
 
-    # Reporting rule:
-    # - patience > 0: early stopping enabled, return the best monitored epoch
-    # - patience = 0: run full training and return the last epoch
-    use_best_epoch = args.patience > 0
-    peak_epoch = best_epoch
-    peak_metric = best_metric
-    if use_best_epoch and best_preds is not None and best_labels is not None:
-        report_preds = best_preds
-        report_labels = best_labels
-        report_epoch = best_epoch
-    else:
-        report_preds = last_preds
-        report_labels = last_labels
-        report_epoch = last_epoch
+    if best_state is not None:
+        classifier.load_state_dict(best_state)
 
-    acc = float(accuracy_score(report_labels, report_preds))
-    f1 = float(f1_score(report_labels, report_preds, average="macro"))
-    mcc = float(matthews_corrcoef(report_labels, report_preds))
+    # Final metrics on the held-out evaluation split:
+    # - GB / NT: official test
+    # - GUE / GUE+: provided dev
+    classifier.eval()
+    all_preds, all_labels = [], []
+    with torch.inference_mode():
+        for batch in test_dl:
+            input_ids      = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels         = batch["labels"].to(device)
+            logits = classifier(input_ids, attention_mask)
+            preds  = logits.argmax(dim=-1)
+            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(labels.cpu().tolist())
+            del input_ids, attention_mask, labels, logits, preds
+
+    acc = float(accuracy_score(all_labels, all_preds))
+    f1 = float(f1_score(all_labels, all_preds, average="macro"))
+    mcc = float(matthews_corrcoef(all_labels, all_preds))
 
     # Cleanup VRAM between tasks
     del classifier, backbone, optimizer, scheduler, trainable
-    del train_dl, test_dl, train_ds, test_ds, generator
-    del all_preds, all_labels, best_preds, best_labels, last_preds, last_labels, le, train_y, test_y
+    del train_dl, val_dl, test_dl, train_ds, val_ds, test_ds, generator
+    del all_preds, all_labels, best_state, le, train_y, test_y, fit_y, val_y
     gc.collect()
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -527,11 +541,11 @@ def train_one_task(
         "accuracy": acc,
         "f1": f1,
         "mcc": mcc,
-        "reported_epoch": int(report_epoch),
-        "selection_mode": "best" if use_best_epoch else "last",
-        "peak_epoch": int(peak_epoch),
+        "reported_epoch": int(best_epoch),
+        "selection_mode": "best",
+        "peak_epoch": int(best_epoch),
         "best_monitor": monitor_name,
-        "best_monitor_value": float(peak_metric),
+        "best_monitor_value": float(best_metric),
     }
 
 
@@ -587,7 +601,7 @@ def print_results_table(results: dict, benchmarks: list, title: str, metric: str
         print(row)
 
     print(sep)
-    print(f"({metric} %, full fine-tuning, train→dev for GUE / train→test for GB/NT)")
+    print(f"({metric} %, full fine-tuning, GB/NT use train→val for selection then test; GUE/GUE+ report dev)")
 
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
