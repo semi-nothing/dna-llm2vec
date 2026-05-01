@@ -502,6 +502,16 @@ class ContrastiveTrainerLora(Trainer):
         if proc is not None:
             proc.save_pretrained(output_dir)
 
+    def _save_optimizer_and_scheduler(self, output_dir: str):
+        """
+        Intentionally skip optimizer / scheduler checkpointing.
+
+        For this LoRA contrastive stage we mainly need adapter/model checkpoints.
+        On some filesystems, saving optimizer.pt has caused intermittent
+        torch.save zip-writer failures that abort otherwise healthy runs.
+        """
+        return
+
     def _load_best_model(self):
         if self.state.best_model_checkpoint is None:
             return
