@@ -268,11 +268,24 @@ def _cross_junction_metrics(attn: np.ndarray, boundary: int) -> dict[str, float]
 
 def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict[str, Any]], args):
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
 
     model_names = list(results.keys())
     nrows = len(examples)
     ncols = len(model_names)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5.5 * ncols, 5 * nrows), squeeze=False)
+    fig = plt.figure(figsize=(5.5 * ncols + 3.8, 5 * nrows))
+    gs = fig.add_gridspec(
+        nrows,
+        ncols + 1,
+        width_ratios=[1.0] * ncols + [0.82],
+        wspace=0.36,
+        hspace=0.42,
+    )
+    axes = np.asarray(
+        [[fig.add_subplot(gs[row, col]) for col in range(ncols)] for row in range(nrows)],
+        dtype=object,
+    )
+    quant_ax = fig.add_subplot(gs[:, -1])
 
     heatmaps = [
         np.asarray(model_result[ex_key]["heatmap"], dtype=np.float32)
@@ -303,16 +316,109 @@ def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict
             ax = axes[row, col]
             vmax = shared_vmax if shared_vmax is not None else _panel_vmax(heatmap)
             im = ax.imshow(heatmap, cmap="magma", vmin=0.0, vmax=vmax, origin="lower")
-            ax.axvline(boundary_bin - 0.5, color="cyan", linewidth=1.2, linestyle="--")
-            ax.axhline(boundary_bin - 0.5, color="cyan", linewidth=1.2, linestyle="--")
+            n_bins = heatmap.shape[0]
+            ax.axvline(boundary_bin - 0.5, color="cyan", linewidth=1.4, linestyle="--")
+            ax.axhline(boundary_bin - 0.5, color="cyan", linewidth=1.4, linestyle="--")
+
+            # Highlight the two off-diagonal enhancer-promoter cross-junction quadrants.
+            cross_color = "#00e5ff"
+            ax.add_patch(
+                Rectangle(
+                    (boundary_bin - 0.5, -0.5),
+                    n_bins - boundary_bin,
+                    boundary_bin,
+                    fill=False,
+                    edgecolor=cross_color,
+                    linewidth=2.0,
+                )
+            )
+            ax.add_patch(
+                Rectangle(
+                    (-0.5, boundary_bin - 0.5),
+                    boundary_bin,
+                    n_bins - boundary_bin,
+                    fill=False,
+                    edgecolor=cross_color,
+                    linewidth=2.0,
+                )
+            )
+            ax.text(
+                boundary_bin + (n_bins - boundary_bin) / 2,
+                boundary_bin / 2,
+                "E->P",
+                color="white",
+                ha="center",
+                va="center",
+                fontsize=8,
+                bbox=dict(facecolor="black", alpha=0.35, edgecolor="none", pad=1.5),
+            )
+            ax.text(
+                boundary_bin / 2,
+                boundary_bin + (n_bins - boundary_bin) / 2,
+                "P->E",
+                color="white",
+                ha="center",
+                va="center",
+                fontsize=8,
+                bbox=dict(facecolor="black", alpha=0.35, edgecolor="none", pad=1.5),
+            )
+
+            enhancer_center = max((boundary_bin - 1) / 2, 0)
+            promoter_center = boundary_bin + max((n_bins - boundary_bin - 1) / 2, 0)
+            ax.set_xticks([enhancer_center, promoter_center])
+            ax.set_xticklabels(["Enhancer", "Promoter"], rotation=0)
+            ax.set_yticks([enhancer_center, promoter_center])
+            ax.set_yticklabels(["Enhancer", "Promoter"], rotation=90, va="center")
             label_name = "interacting" if example["label"] == 1 else "non-interacting"
             ratio = item["metrics"]["cross_over_within_ratio"]
             ax.set_title(
                 f"{model_name} | {label_name}\n"
                 f"cross/within={ratio:.3f}"
             )
-            ax.set_xlabel("Key positions")
-            ax.set_ylabel("Query positions")
+            ax.set_xlabel("Key region")
+            ax.set_ylabel("Query region")
+
+    label_names = [
+        "interacting" if example["label"] == 1 else "non-interacting"
+        for example in examples
+    ]
+    colors = {
+        "interacting": "#e15759",
+        "non-interacting": "#4e79a7",
+    }
+    x = np.arange(len(model_names), dtype=float)
+    width = min(0.34, 0.7 / max(len(examples), 1))
+    offsets = (np.arange(len(examples)) - (len(examples) - 1) / 2) * width
+    for ex_idx, example in enumerate(examples):
+        ex_key = f"label_{example['label']}"
+        label_name = label_names[ex_idx]
+        ratios = [
+            results[model_name][ex_key]["metrics"]["cross_over_within_ratio"]
+            for model_name in model_names
+        ]
+        quant_ax.bar(
+            x + offsets[ex_idx],
+            ratios,
+            width=width,
+            color=colors.get(label_name, "0.5"),
+            alpha=0.85,
+            label=label_name,
+        )
+        quant_ax.scatter(
+            x + offsets[ex_idx],
+            ratios,
+            s=22,
+            color="black",
+            zorder=3,
+            linewidth=0,
+        )
+    quant_ax.axhline(1.0, color="0.35", linewidth=1.0, linestyle="--")
+    quant_ax.set_title("Cross-junction\nattention ratio")
+    quant_ax.set_ylabel("Cross / within")
+    quant_ax.set_xticks(x)
+    quant_ax.set_xticklabels(model_names, rotation=45, ha="right")
+    quant_ax.grid(axis="y", alpha=0.25, linewidth=0.8)
+    quant_ax.legend(frameon=False, fontsize=8)
 
     if im is not None:
         cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
