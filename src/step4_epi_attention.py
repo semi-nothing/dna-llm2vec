@@ -274,26 +274,35 @@ def _cross_junction_metrics(attn: np.ndarray, boundary: int) -> dict[str, float]
     }
 
 
+def _display_model_name(model_name: str) -> str:
+    parts = model_name.split("_", 1)
+    if parts and len(parts[0]) >= 2 and parts[0][0] == "M" and parts[0][1:].isdigit():
+        return parts[0]
+    return model_name
+
+
 def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict[str, Any]], args):
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
 
     model_names = list(results.keys())
+    display_names = [_display_model_name(name) for name in model_names]
     nrows = len(examples)
     ncols = len(model_names)
-    fig = plt.figure(figsize=(5.5 * ncols + 3.8, 5 * nrows))
+    fig = plt.figure(figsize=(5.0 * ncols + 4.6, 4.9 * nrows + 0.4))
     gs = fig.add_gridspec(
         nrows,
-        ncols + 1,
-        width_ratios=[1.0] * ncols + [0.82],
-        wspace=0.36,
+        ncols + 2,
+        width_ratios=[1.0] * ncols + [0.82, 0.045],
+        wspace=0.42,
         hspace=0.42,
     )
     axes = np.asarray(
         [[fig.add_subplot(gs[row, col]) for col in range(ncols)] for row in range(nrows)],
         dtype=object,
     )
-    quant_ax = fig.add_subplot(gs[:, -1])
+    quant_ax = fig.add_subplot(gs[:, ncols])
+    cbar_ax = fig.add_subplot(gs[:, ncols + 1])
 
     heatmaps = [
         np.asarray(model_result[ex_key]["heatmap"], dtype=np.float32)
@@ -378,13 +387,17 @@ def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict
             ax.set_yticks([enhancer_center, promoter_center])
             ax.set_yticklabels(["Enhancer", "Promoter"], rotation=90, va="center")
             label_name = "interacting" if example["label"] == 1 else "non-interacting"
-            ratio = item["metrics"]["cross_over_within_ratio"]
-            ax.set_title(
-                f"{model_name} | {label_name}\n"
-                f"cross/within={ratio:.3f}"
-            )
-            ax.set_xlabel("Key region")
-            ax.set_ylabel("Query region")
+            ax.set_title(f"{display_names[col]} | {label_name}")
+            if row == nrows - 1:
+                ax.set_xlabel("Key region")
+            else:
+                ax.set_xlabel("")
+                ax.set_xticklabels([])
+            if col == 0:
+                ax.set_ylabel("Query region")
+            else:
+                ax.set_ylabel("")
+                ax.set_yticklabels([])
 
     label_names = [
         "interacting" if example["label"] == 1 else "non-interacting"
@@ -398,7 +411,7 @@ def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict
         ("left_to_right_over_within_ratio", "E->P"),
         ("right_to_left_over_within_ratio", "P->E"),
     ]
-    group_centers = np.arange(len(model_names), dtype=float) * 2.7
+    group_centers = np.arange(len(model_names), dtype=float) * 2.35
     direction_offsets = np.asarray([-0.42, 0.42])
     width = min(0.28, 0.6 / max(len(examples), 1))
     example_offsets = (np.arange(len(examples)) - (len(examples) - 1) / 2) * width
@@ -432,30 +445,24 @@ def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict
     quant_ax.set_ylabel("Direction / within")
     tick_positions = []
     tick_labels = []
-    for center, model_name in zip(group_centers, model_names):
+    for center, display_name in zip(group_centers, display_names):
         for direction_offset, (_metric_key, direction_label) in zip(direction_offsets, directions):
             tick_positions.append(center + direction_offset)
-            tick_labels.append(f"{model_name}\n{direction_label}")
+            tick_labels.append(f"{display_name}\n{direction_label}")
     quant_ax.set_xticks(tick_positions)
     quant_ax.set_xticklabels(tick_labels, rotation=45, ha="right")
     quant_ax.grid(axis="y", alpha=0.25, linewidth=0.8)
     quant_ax.legend(frameon=False, fontsize=8)
 
     if im is not None:
-        cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
+        cbar = fig.colorbar(im, cax=cbar_ax)
         if args.color_scale in {"panel", "robust_panel"}:
-            cbar.set_label("Last-layer attention (panel-scaled)")
+            cbar.set_label("Attention\n(panel-scaled)")
         else:
-            cbar.set_label("Last-layer attention")
+            cbar.set_label("Attention")
 
-    order_text = "promoter+enhancer" if args.epi_reverse_order else "enhancer+promoter"
-    fig.suptitle(
-        f"{args.title}\n"
-        f"{args.task_key} | {args.split} split | crop={args.epi_crop_bp}bp ({args.epi_crop_mode}) | "
-        f"order={order_text} | scale={args.color_scale}",
-        fontsize=13,
-    )
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.suptitle(args.title, fontsize=14)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     return fig
 
 
