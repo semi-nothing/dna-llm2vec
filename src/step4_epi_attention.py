@@ -254,6 +254,12 @@ def _cross_junction_metrics(attn: np.ndarray, boundary: int) -> dict[str, float]
     cross_mean = float(np.nanmean([left_to_right, right_to_left]))
     within_mean = float(np.nanmean([within_left, within_right]))
     ratio = float(cross_mean / within_mean) if within_mean and not np.isnan(within_mean) else float("nan")
+    left_to_right_ratio = (
+        float(left_to_right / within_mean) if within_mean and not np.isnan(within_mean) else float("nan")
+    )
+    right_to_left_ratio = (
+        float(right_to_left / within_mean) if within_mean and not np.isnan(within_mean) else float("nan")
+    )
 
     return {
         "left_to_right_mean": left_to_right,
@@ -263,6 +269,8 @@ def _cross_junction_metrics(attn: np.ndarray, boundary: int) -> dict[str, float]
         "cross_mean": cross_mean,
         "within_mean": within_mean,
         "cross_over_within_ratio": ratio,
+        "left_to_right_over_within_ratio": left_to_right_ratio,
+        "right_to_left_over_within_ratio": right_to_left_ratio,
     }
 
 
@@ -329,7 +337,7 @@ def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict
                     boundary_bin,
                     fill=False,
                     edgecolor=cross_color,
-                    linewidth=2.0,
+                    linewidth=1.4,
                 )
             )
             ax.add_patch(
@@ -339,7 +347,7 @@ def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict
                     n_bins - boundary_bin,
                     fill=False,
                     edgecolor=cross_color,
-                    linewidth=2.0,
+                    linewidth=1.4,
                 )
             )
             ax.text(
@@ -386,37 +394,50 @@ def _plot_attention_grid(results: dict[str, dict[str, Any]], examples: list[dict
         "interacting": "#e15759",
         "non-interacting": "#4e79a7",
     }
-    x = np.arange(len(model_names), dtype=float)
-    width = min(0.34, 0.7 / max(len(examples), 1))
-    offsets = (np.arange(len(examples)) - (len(examples) - 1) / 2) * width
+    directions = [
+        ("left_to_right_over_within_ratio", "E->P"),
+        ("right_to_left_over_within_ratio", "P->E"),
+    ]
+    group_centers = np.arange(len(model_names), dtype=float) * 2.7
+    direction_offsets = np.asarray([-0.42, 0.42])
+    width = min(0.28, 0.6 / max(len(examples), 1))
+    example_offsets = (np.arange(len(examples)) - (len(examples) - 1) / 2) * width
     for ex_idx, example in enumerate(examples):
         ex_key = f"label_{example['label']}"
         label_name = label_names[ex_idx]
-        ratios = [
-            results[model_name][ex_key]["metrics"]["cross_over_within_ratio"]
-            for model_name in model_names
-        ]
-        quant_ax.bar(
-            x + offsets[ex_idx],
-            ratios,
-            width=width,
-            color=colors.get(label_name, "0.5"),
-            alpha=0.85,
-            label=label_name,
-        )
-        quant_ax.scatter(
-            x + offsets[ex_idx],
-            ratios,
-            s=22,
-            color="black",
-            zorder=3,
-            linewidth=0,
-        )
+        for direction_idx, (metric_key, _direction_label) in enumerate(directions):
+            xs = group_centers + direction_offsets[direction_idx] + example_offsets[ex_idx]
+            ratios = [
+                results[model_name][ex_key]["metrics"][metric_key]
+                for model_name in model_names
+            ]
+            quant_ax.bar(
+                xs,
+                ratios,
+                width=width,
+                color=colors.get(label_name, "0.5"),
+                alpha=0.85,
+                label=label_name if direction_idx == 0 else None,
+            )
+            quant_ax.scatter(
+                xs,
+                ratios,
+                s=18,
+                color="black",
+                zorder=3,
+                linewidth=0,
+            )
     quant_ax.axhline(1.0, color="0.35", linewidth=1.0, linestyle="--")
-    quant_ax.set_title("Cross-junction\nattention ratio")
-    quant_ax.set_ylabel("Cross / within")
-    quant_ax.set_xticks(x)
-    quant_ax.set_xticklabels(model_names, rotation=45, ha="right")
+    quant_ax.set_title("Directional cross-junction\nattention ratio")
+    quant_ax.set_ylabel("Direction / within")
+    tick_positions = []
+    tick_labels = []
+    for center, model_name in zip(group_centers, model_names):
+        for direction_offset, (_metric_key, direction_label) in zip(direction_offsets, directions):
+            tick_positions.append(center + direction_offset)
+            tick_labels.append(f"{model_name}\n{direction_label}")
+    quant_ax.set_xticks(tick_positions)
+    quant_ax.set_xticklabels(tick_labels, rotation=45, ha="right")
     quant_ax.grid(axis="y", alpha=0.25, linewidth=0.8)
     quant_ax.legend(frameon=False, fontsize=8)
 
