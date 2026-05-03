@@ -79,6 +79,10 @@ def parse_args():
                    help="global: sample negatives from all promoters in the split (broad, easier). "
                         "per-enhancer: sample only from the promoters paired with this enhancer in "
                         "the data file (matches the original EPI candidate set, harder).")
+    p.add_argument("--allow-short-candidates", action="store_true",
+                   help="Allow queries whose effective candidate set is smaller than --candidate-size. "
+                        "By default the script fails when the candidate pool degenerates, because "
+                        "Top-k metrics become misleading (e.g. candidate size 1 gives Top1=100%).")
     p.add_argument("--repeats", type=int, default=1,
                    help="Repeat negative sampling this many times and average metrics.")
     p.add_argument("--max-queries", type=int, default=None,
@@ -224,6 +228,7 @@ def _evaluate_retrieval_for_model(
     per_enhancer_pool: dict[str, set[str]],
     candidate_pool_mode: str,
     candidate_size: int,
+    allow_short_candidates: bool,
     repeats: int,
     seed: int,
 ) -> dict[str, Any]:
@@ -285,13 +290,22 @@ def _evaluate_retrieval_for_model(
                 candidate_indices = np.asarray([true_idx], dtype=np.int64)
             rng.shuffle(candidate_indices)
 
-            if (not short_pool_warned) and len(candidate_indices) < candidate_size:
-                print(
-                    f"  [warn] {model_name}: enhancer at row {ex.row_idx} produced only "
-                    f"{len(candidate_indices)} candidates (requested {candidate_size}); "
-                    f"effective candidate size will vary per query."
+            if len(candidate_indices) < candidate_size:
+                message = (
+                    f"{model_name}: enhancer at row {ex.row_idx} produced only "
+                    f"{len(candidate_indices)} candidates (requested {candidate_size}). "
+                    f"This usually means --candidate-pool={candidate_pool_mode!r} is "
+                    f"degenerate for this split."
                 )
-                short_pool_warned = True
+                if not allow_short_candidates:
+                    raise ValueError(
+                        message
+                        + " Use --candidate-pool global, lower --candidate-size, or pass "
+                        "--allow-short-candidates only for debugging."
+                    )
+                if not short_pool_warned:
+                    print(f"  [warn] {message}")
+                    short_pool_warned = True
 
             rank = _rank_true_target(
                 query_embeddings[q_idx],
@@ -405,6 +419,13 @@ def main():
             f"queries={len(examples):>5} promoters={len(promoter_pool):>5} "
             f"enhancers_w_pool={len(per_enhancer_pool):>5}"
         )
+        if args.candidate_pool == "per-enhancer":
+            pool_sizes = np.asarray([len(v) for v in per_enhancer_pool.values()], dtype=np.int64)
+            print(
+                f"        per-enhancer pool sizes: "
+                f"mean={pool_sizes.mean():.2f}, median={np.median(pool_sizes):.1f}, "
+                f"max={pool_sizes.max()}"
+            )
 
     results: dict[str, Any] = {
         "config": vars(args),
@@ -466,6 +487,7 @@ def main():
                 per_enhancer_pool=per_enhancer_pool,
                 candidate_pool_mode=args.candidate_pool,
                 candidate_size=args.candidate_size,
+                allow_short_candidates=args.allow_short_candidates,
                 repeats=args.repeats,
                 seed=args.seed,
             )
