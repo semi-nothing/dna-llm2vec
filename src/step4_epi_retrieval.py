@@ -14,6 +14,10 @@ Two candidate-pool modes are supported (--candidate-pool):
     on the same enhancer's rows in the data file (typically the harder
     enhancer-specific negatives baked into the EPI dataset).
 
+The retrieval direction can be flipped with --retrieval-direction. The default
+is enhancer-to-promoter, matching the original script. promoter-to-enhancer
+uses promoters as queries and ranks candidate enhancers.
+
 Replace the example checkpoint paths below with paths that exist on your
 machine before running.
 
@@ -61,7 +65,7 @@ class RetrievalExample:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Run enhancer-to-promoter EPI retrieval.")
+    p = argparse.ArgumentParser(description="Run EPI embedding retrieval.")
     p.add_argument("--models", nargs="+", required=True, metavar="name:path:mode")
     p.add_argument("--gue-plus-dir", required=True, help="Root directory containing EPI/")
     p.add_argument(
@@ -72,17 +76,27 @@ def parse_args():
     )
     p.add_argument("--split", default="dev", choices=("dev", "test", "train"))
     p.add_argument("--candidate-size", type=int, default=1000,
-                   help="Total candidate promoters per query, including the true promoter. "
+                   help="Total candidates per query, including the true target. "
                         "If the available candidate pool is smaller than this, the effective "
                         "candidate size shrinks; check candidate_size_effective_mean in the output.")
     p.add_argument("--candidate-pool", choices=("global", "per-enhancer"), default="global",
-                   help="global: sample negatives from all promoters in the split (broad, easier). "
-                        "per-enhancer: sample only from the promoters paired with this enhancer in "
-                        "the data file (matches the original EPI candidate set, harder).")
+                   help="global: sample negatives from all targets in the split (broad, easier). "
+                        "per-enhancer: sample only from targets paired with the query in "
+                        "the data file. This often degenerates for GUE+ EPI splits.")
+    p.add_argument("--retrieval-direction",
+                   choices=("enhancer-to-promoter", "promoter-to-enhancer"),
+                   default="enhancer-to-promoter",
+                   help="Which side is used as query and which side is ranked.")
+    p.add_argument("--negative-sampling", choices=("random", "gc-matched"), default="random",
+                   help="random: sample negatives uniformly from the candidate pool. "
+                        "gc-matched: sample from candidates closest in GC fraction to the true target.")
+    p.add_argument("--gc-match-multiplier", type=int, default=1,
+                   help="For --negative-sampling gc-matched, sample negatives from the closest "
+                        "(candidate_size - 1) * multiplier targets by GC fraction. Lower is stricter.")
     p.add_argument("--allow-short-candidates", action="store_true",
                    help="Allow queries whose effective candidate set is smaller than --candidate-size. "
                         "By default the script fails when the candidate pool degenerates, because "
-                        "Top-k metrics become misleading (e.g. candidate size 1 gives Top1=100%).")
+                        "Top-k metrics become misleading (e.g. candidate size 1 gives Top1=100%%).")
     p.add_argument("--repeats", type=int, default=1,
                    help="Repeat negative sampling this many times and average metrics.")
     p.add_argument("--max-queries", type=int, default=None,
@@ -107,13 +121,23 @@ def _task_display_name(task_key: str) -> str:
 
 def _load_epi_pairs(
     args, task_key: str
-) -> tuple[list[RetrievalExample], list[str], dict[str, set[str]], dict[str, set[str]]]:
+) -> tuple[
+    list[RetrievalExample],
+    list[str],
+    list[str],
+    dict[str, set[str]],
+    dict[str, set[str]],
+    dict[str, set[str]],
+    dict[str, set[str]],
+]:
     """
     Returns:
         positives           : list of (enhancer, true_promoter) RetrievalExamples
                               from rows where label == 1.
         unique_promoters    : sorted unique list of every promoter seen in the
                               split (used as the global candidate pool).
+        unique_enhancers    : sorted unique list of every enhancer seen in the
+                              split (used when direction is promoter-to-enhancer).
         per_enhancer_pool   : dict[enhancer -> set[promoter]] of every promoter
                               that appeared on a row with that enhancer (used
                               when --candidate-pool=per-enhancer).
@@ -122,6 +146,8 @@ def _load_epi_pairs(
                               computed before --max-queries truncation so quick
                               pilots do not accidentally sample held-out true
                               positives as negatives.
+        per_promoter_pool   : dict[promoter -> set[enhancer]] for reverse retrieval.
+        positive_enhancers  : dict[promoter -> set[enhancer]] for reverse retrieval.
     """
     subdir = base._EPI_SUBDIR_DEFAULT.get(task_key, task_key)
     task_dir = os.path.join(args.gue_plus_dir, "EPI", subdir)
@@ -130,9 +156,12 @@ def _load_epi_pairs(
         raise FileNotFoundError(f"Missing EPI split file: {path}")
 
     positives: list[RetrievalExample] = []
+    enhancer_pool: list[str] = []
     promoter_pool: list[str] = []
     per_enhancer_pool: dict[str, set[str]] = defaultdict(set)
+    per_promoter_pool: dict[str, set[str]] = defaultdict(set)
     positive_targets: dict[str, set[str]] = defaultdict(set)
+    positive_enhancers: dict[str, set[str]] = defaultdict(set)
     task_name = _task_display_name(task_key)
     dropped = 0
 
@@ -165,9 +194,12 @@ def _load_epi_pairs(
                 ) from e
 
             promoter_pool.append(promoter)
+            enhancer_pool.append(enhancer)
             per_enhancer_pool[enhancer].add(promoter)
+            per_promoter_pool[promoter].add(enhancer)
             if label == 1:
                 positive_targets[enhancer].add(promoter)
+                positive_enhancers[promoter].add(enhancer)
                 positives.append(
                     RetrievalExample(
                         row_idx=row_idx,
@@ -182,25 +214,29 @@ def _load_epi_pairs(
         positives = positives[: args.max_queries]
 
     unique_promoters = sorted(set(promoter_pool))
+    unique_enhancers = sorted(set(enhancer_pool))
     if dropped:
         print(f"  {task_key}: dropped {dropped} rows with empty/non-ACGT regions")
     if not positives:
         raise ValueError(f"No positive EPI pairs found for {task_key} ({args.split}).")
     if not unique_promoters:
         raise ValueError(f"No candidate promoters found for {task_key} ({args.split}).")
-    return positives, unique_promoters, dict(per_enhancer_pool), dict(positive_targets)
-
-
-def _known_targets_by_enhancer(examples: list[RetrievalExample]) -> dict[str, set[str]]:
-    known: dict[str, set[str]] = defaultdict(set)
-    for ex in examples:
-        known[ex.enhancer].add(ex.promoter)
-    return known
+    if not unique_enhancers:
+        raise ValueError(f"No candidate enhancers found for {task_key} ({args.split}).")
+    return (
+        positives,
+        unique_promoters,
+        unique_enhancers,
+        dict(per_enhancer_pool),
+        dict(positive_targets),
+        dict(per_promoter_pool),
+        dict(positive_enhancers),
+    )
 
 
 def _rank_true_target(
     query: np.ndarray,
-    promoter_embeddings: np.ndarray,
+    target_embeddings: np.ndarray,
     true_idx: int,
     candidate_indices: np.ndarray,
 ) -> int:
@@ -214,15 +250,44 @@ def _rank_true_target(
     positions. Since the candidate order is randomised by the caller, this
     gives the expected mid-rank under random tie-break.
     """
-    scores = promoter_embeddings[candidate_indices] @ query
+    scores = target_embeddings[candidate_indices] @ query
     true_positions = np.flatnonzero(candidate_indices == true_idx)
     if true_positions.size != 1:
-        raise ValueError("Candidate set must contain the true promoter exactly once.")
+        raise ValueError("Candidate set must contain the true target exactly once.")
     true_pos = int(true_positions[0])
     true_score = float(scores[true_pos])
     higher = int(np.sum(scores > true_score))
     equal_before = int(np.sum((scores[:true_pos] == true_score)))
     return higher + equal_before + 1
+
+
+def _gc_fraction(seq: str) -> float:
+    if not seq:
+        return float("nan")
+    return (seq.count("G") + seq.count("C")) / len(seq)
+
+
+def _sample_negative_indices(
+    rng: np.random.Generator,
+    negative_pool: np.ndarray,
+    n_neg: int,
+    true_idx: int,
+    target_gc: np.ndarray | None,
+    negative_sampling: str,
+    gc_match_multiplier: int,
+) -> np.ndarray:
+    if n_neg <= 0:
+        return np.asarray([], dtype=np.int64)
+    if negative_sampling == "random":
+        return rng.choice(negative_pool, size=n_neg, replace=False)
+
+    if target_gc is None:
+        raise ValueError("target_gc is required for gc-matched negative sampling.")
+    true_gc = target_gc[true_idx]
+    ordered = negative_pool[np.argsort(np.abs(target_gc[negative_pool] - true_gc))]
+    window_size = max(n_neg, n_neg * max(1, gc_match_multiplier))
+    window = ordered[: min(len(ordered), window_size)]
+    return rng.choice(window, size=n_neg, replace=False)
 
 
 def _expected_random_metrics(candidate_sizes: list[int]) -> dict[str, float]:
@@ -262,50 +327,56 @@ def _expected_random_metrics(candidate_sizes: list[int]) -> dict[str, float]:
 def _evaluate_retrieval_for_model(
     model_name: str,
     query_embeddings: np.ndarray,
-    promoter_embeddings: np.ndarray,
+    target_embeddings: np.ndarray,
     examples: list[RetrievalExample],
-    promoter_to_idx: dict[str, int],
-    promoter_pool: list[str],
-    per_enhancer_pool: dict[str, set[str]],
-    positive_targets_by_enhancer: dict[str, set[str]],
+    query_values: list[str],
+    true_target_values: list[str],
+    target_to_idx: dict[str, int],
+    target_pool: list[str],
+    per_query_pool: dict[str, set[str]],
+    positive_targets_by_query: dict[str, set[str]],
     candidate_pool_mode: str,
+    retrieval_direction: str,
+    negative_sampling: str,
+    target_gc: np.ndarray | None,
+    gc_match_multiplier: int,
     candidate_size: int,
     allow_short_candidates: bool,
     repeats: int,
     seed: int,
 ) -> dict[str, Any]:
     """
-    Evaluate enhancer-to-promoter retrieval for one model on one task.
+    Evaluate retrieval for one model on one task.
 
-    `query_embeddings[q_idx]` must be the embedding for `examples[q_idx].enhancer`.
+    `query_embeddings[q_idx]` must be the embedding for `query_values[q_idx]`.
     The negative pool for each query depends on `candidate_pool_mode`:
-      - "global"       : sample from all promoters in the split (minus this
-                         enhancer's known targets).
-      - "per-enhancer" : sample only from promoters that appear on this
-                         enhancer's rows in the data file (minus this
-                         enhancer's known true targets).
+      - "global"       : sample from all targets in the split (minus this
+                         query's known positive targets).
+      - "per-enhancer" : for enhancer-to-promoter, sample only from promoters
+                         paired with this enhancer; for promoter-to-enhancer,
+                         sample only from enhancers paired with this promoter.
     """
     rng = np.random.default_rng(seed)
-    known_targets = positive_targets_by_enhancer or _known_targets_by_enhancer(examples)
+    known_targets = positive_targets_by_query
     global_pool_indices = np.asarray(
-        [promoter_to_idx[p] for p in promoter_pool], dtype=np.int64
+        [target_to_idx[p] for p in target_pool], dtype=np.int64
     )
 
-    # Pre-compute the negative pool per enhancer once (reused across repeats).
-    enh_to_negpool: dict[str, np.ndarray] = {}
-    for enh in {ex.enhancer for ex in examples}:
+    # Pre-compute the negative pool per query once (reused across repeats).
+    query_to_negpool: dict[str, np.ndarray] = {}
+    for query_value in set(query_values):
         forbidden_idx = np.asarray(
-            [promoter_to_idx[p] for p in known_targets.get(enh, set())],
+            [target_to_idx[p] for p in known_targets.get(query_value, set())],
             dtype=np.int64,
         )
         if candidate_pool_mode == "per-enhancer":
             base_pool = np.asarray(
-                [promoter_to_idx[p] for p in per_enhancer_pool.get(enh, set())],
+                [target_to_idx[p] for p in per_query_pool.get(query_value, set())],
                 dtype=np.int64,
             )
         else:  # "global"
             base_pool = global_pool_indices
-        enh_to_negpool[enh] = (
+        query_to_negpool[query_value] = (
             np.setdiff1d(base_pool, forbidden_idx, assume_unique=False).astype(np.int64)
         )
 
@@ -320,11 +391,20 @@ def _evaluate_retrieval_for_model(
         for q_idx, ex in enumerate(
             tqdm(examples, desc=f"{model_name} retrieval r{repeat + 1}", leave=False)
         ):
-            true_idx = promoter_to_idx[ex.promoter]
-            negative_pool = enh_to_negpool[ex.enhancer]
+            query_value = query_values[q_idx]
+            true_idx = target_to_idx[true_target_values[q_idx]]
+            negative_pool = query_to_negpool[query_value]
             n_neg = max(0, min(candidate_size - 1, len(negative_pool)))
             if n_neg:
-                sampled = rng.choice(negative_pool, size=n_neg, replace=False)
+                sampled = _sample_negative_indices(
+                    rng=rng,
+                    negative_pool=negative_pool,
+                    n_neg=n_neg,
+                    true_idx=true_idx,
+                    target_gc=target_gc,
+                    negative_sampling=negative_sampling,
+                    gc_match_multiplier=gc_match_multiplier,
+                )
                 candidate_indices = np.concatenate(
                     [np.asarray([true_idx], dtype=np.int64), sampled]
                 )
@@ -334,10 +414,10 @@ def _evaluate_retrieval_for_model(
 
             if len(candidate_indices) < candidate_size:
                 message = (
-                    f"{model_name}: enhancer at row {ex.row_idx} produced only "
+                    f"{model_name}: query at row {ex.row_idx} produced only "
                     f"{len(candidate_indices)} candidates (requested {candidate_size}). "
                     f"This usually means --candidate-pool={candidate_pool_mode!r} is "
-                    f"degenerate for this split."
+                    f"degenerate for this split/direction."
                 )
                 if not allow_short_candidates:
                     raise ValueError(
@@ -351,7 +431,7 @@ def _evaluate_retrieval_for_model(
 
             rank = _rank_true_target(
                 query_embeddings[q_idx],
-                promoter_embeddings,
+                target_embeddings,
                 true_idx,
                 candidate_indices,
             )
@@ -362,6 +442,7 @@ def _evaluate_retrieval_for_model(
                     {
                         "task_key": ex.task_key,
                         "row_idx": ex.row_idx,
+                        "retrieval_direction": retrieval_direction,
                         "rank": rank,
                         "candidate_size": len(candidate_indices),
                     }
@@ -395,6 +476,8 @@ def _evaluate_retrieval_for_model(
         summary[f"{key}_minus_random"] = summary[key] - summary[f"random_{key}"]
     summary["n_queries"] = len(examples)
     summary["candidate_pool"] = candidate_pool_mode
+    summary["retrieval_direction"] = retrieval_direction
+    summary["negative_sampling"] = negative_sampling
     summary["candidate_size_requested"] = candidate_size
     summary["candidate_size_effective_mean"] = float(np.mean(effective_candidate_sizes))
     summary["candidate_size_effective_median"] = float(np.median(effective_candidate_sizes))
@@ -417,6 +500,9 @@ def _write_summary_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "model",
         "task_key",
         "task_name",
+        "retrieval_direction",
+        "negative_sampling",
+        "candidate_pool",
         "n_queries",
         "candidate_size_effective_mean",
         "candidate_size_effective_median",
@@ -461,8 +547,10 @@ def main():
     print(f"  Models         : {[s.name for s in specs]}")
     print(f"  Tasks          : {task_keys}")
     print(f"  Split          : {args.split}")
+    print(f"  Direction      : {args.retrieval_direction}")
     print(f"  Candidate pool : {args.candidate_pool}")
-    print(f"  Candidates     : {args.candidate_size} (including true promoter)")
+    print(f"  Negatives      : {args.negative_sampling}")
+    print(f"  Candidates     : {args.candidate_size} (including true target)")
     print(f"  Repeats        : {args.repeats}")
     print(f"  Pooling        : {args.pooling}")
     print(f"  Device         : {device}")
@@ -470,17 +558,38 @@ def main():
 
     task_payloads = {}
     for task_key in task_keys:
-        examples, promoter_pool, per_enhancer_pool, positive_targets = _load_epi_pairs(args, task_key)
-        task_payloads[task_key] = (examples, promoter_pool, per_enhancer_pool, positive_targets)
+        (
+            examples,
+            promoter_pool,
+            enhancer_pool,
+            per_enhancer_pool,
+            positive_targets,
+            per_promoter_pool,
+            positive_enhancers,
+        ) = _load_epi_pairs(args, task_key)
+        task_payloads[task_key] = (
+            examples,
+            promoter_pool,
+            enhancer_pool,
+            per_enhancer_pool,
+            positive_targets,
+            per_promoter_pool,
+            positive_enhancers,
+        )
         print(
             f"  {task_key:<5} {examples[0].task_name:<12} "
             f"queries={len(examples):>5} promoters={len(promoter_pool):>5} "
-            f"enhancers_w_pool={len(per_enhancer_pool):>5}"
+            f"enhancers={len(enhancer_pool):>5}"
         )
         if args.candidate_pool == "per-enhancer":
-            pool_sizes = np.asarray([len(v) for v in per_enhancer_pool.values()], dtype=np.int64)
+            pool = (
+                per_enhancer_pool
+                if args.retrieval_direction == "enhancer-to-promoter"
+                else per_promoter_pool
+            )
+            pool_sizes = np.asarray([len(v) for v in pool.values()], dtype=np.int64)
             print(
-                f"        per-enhancer pool sizes: "
+                f"        paired-query pool sizes: "
                 f"mean={pool_sizes.mean():.2f}, median={np.median(pool_sizes):.1f}, "
                 f"max={pool_sizes.max()}"
             )
@@ -499,20 +608,27 @@ def main():
         model, tokenizer = base.load_model(spec, device, dtype)
 
         for task_key in task_keys:
-            examples, promoter_pool, per_enhancer_pool, positive_targets = task_payloads[task_key]
+            (
+                examples,
+                promoter_pool,
+                enhancer_pool,
+                per_enhancer_pool,
+                positive_targets,
+                per_promoter_pool,
+                positive_enhancers,
+            ) = task_payloads[task_key]
             unique_promoters = promoter_pool
             promoter_to_idx = {promoter: i for i, promoter in enumerate(unique_promoters)}
+            unique_enhancers = enhancer_pool
+            enhancer_to_idx = {enhancer: i for i, enhancer in enumerate(unique_enhancers)}
 
             # Deduplicate enhancers before encoding (saves GPU time when the same
             # enhancer appears in multiple positive rows). We keep an index map
             # so we can look up the embedding by enhancer string later.
-            unique_enhancer_list = sorted({ex.enhancer for ex in examples})
-            enh_to_emb_idx = {e: i for i, e in enumerate(unique_enhancer_list)}
-
             unique_enhancer_embeddings = base.encode_sequences(
                 model,
                 tokenizer,
-                unique_enhancer_list,
+                unique_enhancers,
                 batch_size=args.batch_size,
                 max_length=args.max_length,
                 device=device,
@@ -530,21 +646,51 @@ def main():
                 desc=f"{spec.name} {task_key} promoters",
             )
 
-            # Build query-embedding-per-example by indexing into the deduplicated table.
-            query_embeddings = np.stack(
-                [unique_enhancer_embeddings[enh_to_emb_idx[ex.enhancer]] for ex in examples]
+            if args.retrieval_direction == "enhancer-to-promoter":
+                query_embeddings = np.stack(
+                    [unique_enhancer_embeddings[enhancer_to_idx[ex.enhancer]] for ex in examples]
+                )
+                target_embeddings = promoter_embeddings
+                query_values = [ex.enhancer for ex in examples]
+                true_target_values = [ex.promoter for ex in examples]
+                target_to_idx = promoter_to_idx
+                target_pool = unique_promoters
+                per_query_pool = per_enhancer_pool
+                positive_targets_by_query = positive_targets
+            else:
+                query_embeddings = np.stack(
+                    [promoter_embeddings[promoter_to_idx[ex.promoter]] for ex in examples]
+                )
+                target_embeddings = unique_enhancer_embeddings
+                query_values = [ex.promoter for ex in examples]
+                true_target_values = [ex.enhancer for ex in examples]
+                target_to_idx = enhancer_to_idx
+                target_pool = unique_enhancers
+                per_query_pool = per_promoter_pool
+                positive_targets_by_query = positive_enhancers
+
+            target_gc = (
+                np.asarray([_gc_fraction(seq) for seq in target_pool], dtype=np.float64)
+                if args.negative_sampling == "gc-matched"
+                else None
             )
 
             model_result = _evaluate_retrieval_for_model(
                 model_name=spec.name,
                 query_embeddings=query_embeddings,
-                promoter_embeddings=promoter_embeddings,
+                target_embeddings=target_embeddings,
                 examples=examples,
-                promoter_to_idx=promoter_to_idx,
-                promoter_pool=promoter_pool,
-                per_enhancer_pool=per_enhancer_pool,
-                positive_targets_by_enhancer=positive_targets,
+                query_values=query_values,
+                true_target_values=true_target_values,
+                target_to_idx=target_to_idx,
+                target_pool=target_pool,
+                per_query_pool=per_query_pool,
+                positive_targets_by_query=positive_targets_by_query,
                 candidate_pool_mode=args.candidate_pool,
+                retrieval_direction=args.retrieval_direction,
+                negative_sampling=args.negative_sampling,
+                target_gc=target_gc,
+                gc_match_multiplier=args.gc_match_multiplier,
                 candidate_size=args.candidate_size,
                 allow_short_candidates=args.allow_short_candidates,
                 repeats=args.repeats,
@@ -567,11 +713,14 @@ def main():
                     "model": spec.name,
                     "task_key": task_key,
                     "task_name": examples[0].task_name,
+                    "retrieval_direction": args.retrieval_direction,
+                    "negative_sampling": args.negative_sampling,
+                    "candidate_pool": args.candidate_pool,
                     **summary,
                 }
             )
 
-            del unique_enhancer_embeddings, query_embeddings, promoter_embeddings
+            del unique_enhancer_embeddings, query_embeddings, promoter_embeddings, target_embeddings
             if device == "cuda":
                 torch.cuda.empty_cache()
 
@@ -590,6 +739,9 @@ def main():
             "model": spec.name,
             "task_key": "all",
             "task_name": "EPI-Avg",
+            "retrieval_direction": args.retrieval_direction,
+            "negative_sampling": args.negative_sampling,
+            "candidate_pool": args.candidate_pool,
             "n_queries": int(total),
             "candidate_size_effective_mean": float(
                 np.average(
