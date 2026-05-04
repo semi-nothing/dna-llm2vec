@@ -107,7 +107,7 @@ def _task_display_name(task_key: str) -> str:
 
 def _load_epi_pairs(
     args, task_key: str
-) -> tuple[list[RetrievalExample], list[str], dict[str, set[str]]]:
+) -> tuple[list[RetrievalExample], list[str], dict[str, set[str]], dict[str, set[str]]]:
     """
     Returns:
         positives           : list of (enhancer, true_promoter) RetrievalExamples
@@ -117,6 +117,11 @@ def _load_epi_pairs(
         per_enhancer_pool   : dict[enhancer -> set[promoter]] of every promoter
                               that appeared on a row with that enhancer (used
                               when --candidate-pool=per-enhancer).
+        positive_targets    : dict[enhancer -> set[promoter]] of every positive
+                              promoter in the full split. This is intentionally
+                              computed before --max-queries truncation so quick
+                              pilots do not accidentally sample held-out true
+                              positives as negatives.
     """
     subdir = base._EPI_SUBDIR_DEFAULT.get(task_key, task_key)
     task_dir = os.path.join(args.gue_plus_dir, "EPI", subdir)
@@ -127,6 +132,7 @@ def _load_epi_pairs(
     positives: list[RetrievalExample] = []
     promoter_pool: list[str] = []
     per_enhancer_pool: dict[str, set[str]] = defaultdict(set)
+    positive_targets: dict[str, set[str]] = defaultdict(set)
     task_name = _task_display_name(task_key)
     dropped = 0
 
@@ -161,6 +167,7 @@ def _load_epi_pairs(
             promoter_pool.append(promoter)
             per_enhancer_pool[enhancer].add(promoter)
             if label == 1:
+                positive_targets[enhancer].add(promoter)
                 positives.append(
                     RetrievalExample(
                         row_idx=row_idx,
@@ -181,7 +188,7 @@ def _load_epi_pairs(
         raise ValueError(f"No positive EPI pairs found for {task_key} ({args.split}).")
     if not unique_promoters:
         raise ValueError(f"No candidate promoters found for {task_key} ({args.split}).")
-    return positives, unique_promoters, dict(per_enhancer_pool)
+    return positives, unique_promoters, dict(per_enhancer_pool), dict(positive_targets)
 
 
 def _known_targets_by_enhancer(examples: list[RetrievalExample]) -> dict[str, set[str]]:
@@ -218,6 +225,40 @@ def _rank_true_target(
     return higher + equal_before + 1
 
 
+def _expected_random_metrics(candidate_sizes: list[int]) -> dict[str, float]:
+    """Expected retrieval metrics under a uniformly random ranking.
+
+    Each query has exactly one relevant promoter. Candidate-set sizes can vary
+    when the requested pool is larger than the available negatives, so compute
+    the random baseline per query and average.
+    """
+    sizes = np.asarray(candidate_sizes, dtype=np.float64)
+    if sizes.size == 0:
+        return {
+            "random_top1": float("nan"),
+            "random_top5": float("nan"),
+            "random_top10": float("nan"),
+            "random_mrr": float("nan"),
+            "random_median_rank": float("nan"),
+            "random_mean_rank": float("nan"),
+        }
+
+    def random_topk(k: int) -> float:
+        return float(np.mean(np.minimum(k, sizes) / sizes))
+
+    # Expected reciprocal rank for one relevant item uniformly placed in 1..N:
+    # H_N / N. Candidate sets are usually <=1000, so the direct sum is fine.
+    random_mrr = float(np.mean([np.sum(1.0 / np.arange(1, int(n) + 1)) / n for n in sizes]))
+    return {
+        "random_top1": random_topk(1),
+        "random_top5": random_topk(5),
+        "random_top10": random_topk(10),
+        "random_mrr": random_mrr,
+        "random_median_rank": float(np.median((sizes + 1.0) / 2.0)),
+        "random_mean_rank": float(np.mean((sizes + 1.0) / 2.0)),
+    }
+
+
 def _evaluate_retrieval_for_model(
     model_name: str,
     query_embeddings: np.ndarray,
@@ -226,6 +267,7 @@ def _evaluate_retrieval_for_model(
     promoter_to_idx: dict[str, int],
     promoter_pool: list[str],
     per_enhancer_pool: dict[str, set[str]],
+    positive_targets_by_enhancer: dict[str, set[str]],
     candidate_pool_mode: str,
     candidate_size: int,
     allow_short_candidates: bool,
@@ -244,7 +286,7 @@ def _evaluate_retrieval_for_model(
                          enhancer's known true targets).
     """
     rng = np.random.default_rng(seed)
-    known_targets = _known_targets_by_enhancer(examples)
+    known_targets = positive_targets_by_enhancer or _known_targets_by_enhancer(examples)
     global_pool_indices = np.asarray(
         [promoter_to_idx[p] for p in promoter_pool], dtype=np.int64
     )
@@ -347,10 +389,15 @@ def _evaluate_retrieval_for_model(
             for key in all_repeat_metrics[0]
         }
     )
+    random_metrics = _expected_random_metrics(effective_candidate_sizes)
+    summary.update(random_metrics)
+    for key in ("top1", "top5", "top10", "mrr"):
+        summary[f"{key}_minus_random"] = summary[key] - summary[f"random_{key}"]
     summary["n_queries"] = len(examples)
     summary["candidate_pool"] = candidate_pool_mode
     summary["candidate_size_requested"] = candidate_size
     summary["candidate_size_effective_mean"] = float(np.mean(effective_candidate_sizes))
+    summary["candidate_size_effective_median"] = float(np.median(effective_candidate_sizes))
     summary["candidate_size_effective_min"] = int(np.min(effective_candidate_sizes))
     summary["repeats"] = repeats
     return {
@@ -372,12 +419,23 @@ def _write_summary_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "task_name",
         "n_queries",
         "candidate_size_effective_mean",
+        "candidate_size_effective_median",
         "top1",
         "top5",
         "top10",
         "mrr",
+        "random_top1",
+        "random_top5",
+        "random_top10",
+        "random_mrr",
+        "top1_minus_random",
+        "top5_minus_random",
+        "top10_minus_random",
+        "mrr_minus_random",
         "median_rank",
         "mean_rank",
+        "random_median_rank",
+        "random_mean_rank",
     ]
     with open(path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -412,8 +470,8 @@ def main():
 
     task_payloads = {}
     for task_key in task_keys:
-        examples, promoter_pool, per_enhancer_pool = _load_epi_pairs(args, task_key)
-        task_payloads[task_key] = (examples, promoter_pool, per_enhancer_pool)
+        examples, promoter_pool, per_enhancer_pool, positive_targets = _load_epi_pairs(args, task_key)
+        task_payloads[task_key] = (examples, promoter_pool, per_enhancer_pool, positive_targets)
         print(
             f"  {task_key:<5} {examples[0].task_name:<12} "
             f"queries={len(examples):>5} promoters={len(promoter_pool):>5} "
@@ -441,7 +499,7 @@ def main():
         model, tokenizer = base.load_model(spec, device, dtype)
 
         for task_key in task_keys:
-            examples, promoter_pool, per_enhancer_pool = task_payloads[task_key]
+            examples, promoter_pool, per_enhancer_pool, positive_targets = task_payloads[task_key]
             unique_promoters = promoter_pool
             promoter_to_idx = {promoter: i for i, promoter in enumerate(unique_promoters)}
 
@@ -485,6 +543,7 @@ def main():
                 promoter_to_idx=promoter_to_idx,
                 promoter_pool=promoter_pool,
                 per_enhancer_pool=per_enhancer_pool,
+                positive_targets_by_enhancer=positive_targets,
                 candidate_pool_mode=args.candidate_pool,
                 candidate_size=args.candidate_size,
                 allow_short_candidates=args.allow_short_candidates,
@@ -494,7 +553,10 @@ def main():
             summary = model_result["summary"]
             print(
                 f"   {task_key:<5} Top1={summary['top1']*100:6.2f} "
-                f"Top10={summary['top10']*100:6.2f} MRR={summary['mrr']:.4f} "
+                f"Top10={summary['top10']*100:6.2f} "
+                f"(rand {summary['random_top10']*100:5.2f}) "
+                f"MRR={summary['mrr']:.4f} "
+                f"(rand {summary['random_mrr']:.4f}) "
                 f"median_rank={summary['median_rank']:.1f}"
             )
 
@@ -535,13 +597,34 @@ def main():
                     weights=weights,
                 )
             ),
+            "candidate_size_effective_median": float(
+                np.median([row["candidate_size_effective_median"] for row in model_rows])
+            ),
         }
         # top-K, mrr, mean_rank are linear in queries, so weighted average is correct.
-        for key in ("top1", "top5", "top10", "mrr", "mean_rank"):
+        for key in (
+            "top1",
+            "top5",
+            "top10",
+            "mrr",
+            "mean_rank",
+            "random_top1",
+            "random_top5",
+            "random_top10",
+            "random_mrr",
+            "random_mean_rank",
+            "top1_minus_random",
+            "top5_minus_random",
+            "top10_minus_random",
+            "mrr_minus_random",
+        ):
             aggregate[key] = float(np.average([row[key] for row in model_rows], weights=weights))
         # median_rank is non-linear; pool the raw ranks across tasks (first repeat only).
         pooled_ranks = np.asarray(ranks_by_model[spec.name], dtype=np.float64)
         aggregate["median_rank"] = float(np.median(pooled_ranks)) if pooled_ranks.size else float("nan")
+        aggregate["random_median_rank"] = float(
+            np.median([row["random_median_rank"] for row in model_rows])
+        )
         summary_rows.append(aggregate)
         overall[spec.name] = aggregate
     results["overall"] = overall
