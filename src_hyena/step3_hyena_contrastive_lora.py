@@ -353,7 +353,9 @@ def build_training_args(args) -> TrainingArguments:
 def load_contrastive_data(args) -> tuple[RawSequenceDataset, RawSequenceDataset]:
     chunk_size = args.chunk_size or args.max_length * 2
     max_shift = int(round(chunk_size * (1.0 - args.overlap_ratio)))
-    window_bp = chunk_size + max_shift if args.mode == "crop" else args.max_length * 4
+    # HyenaDNA is nucleotide-level, so max_length already corresponds roughly to bp.
+    # DNAGPT uses max_length * 4 for BPE-tokenized DNA; that factor is not used here.
+    window_bp = chunk_size + max_shift if args.mode == "crop" else args.max_length
 
     if args.smoke_test:
         print("  Data source              : synthetic smoke test")
@@ -462,7 +464,7 @@ def main():
         print(f"  Overlap ratio            : {args.overlap_ratio:.0%}")
         print(f"  Max crop shift           : {max_shift} bp")
     else:
-        print(f"  Revcomp window           : {args.max_length * 4} bp")
+        print(f"  Revcomp window           : {args.max_length} bp")
     print(f"  Temperature              : {args.temperature}")
     print(f"  Projection dim           : {args.proj_dim}")
 
