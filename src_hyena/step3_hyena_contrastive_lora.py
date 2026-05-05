@@ -163,11 +163,10 @@ class CropPairCollator:
 @dataclass
 class RevCompPairCollator:
     tokenizer: object
-    chunk_size: int
     max_length: int
 
     def _make_pair(self, seq: str) -> tuple[str, str]:
-        seq = seq[: self.chunk_size].upper()
+        seq = seq.upper()
         return seq, reverse_complement(seq)
 
     def _attention_mask(self, encoding) -> torch.Tensor:
@@ -354,7 +353,7 @@ def build_training_args(args) -> TrainingArguments:
 def load_contrastive_data(args) -> tuple[RawSequenceDataset, RawSequenceDataset]:
     chunk_size = args.chunk_size or args.max_length * 2
     max_shift = int(round(chunk_size * (1.0 - args.overlap_ratio)))
-    window_bp = chunk_size + max_shift if args.mode == "crop" else chunk_size
+    window_bp = chunk_size + max_shift if args.mode == "crop" else args.max_length * 4
 
     if args.smoke_test:
         print("  Data source              : synthetic smoke test")
@@ -376,7 +375,8 @@ def load_contrastive_data(args) -> tuple[RawSequenceDataset, RawSequenceDataset]
         ]
         if args.filter_n:
             sequences = [seq for seq in sequences if not VALID_BASES.search(seq)]
-        sequences = [seq for seq in sequences if len(seq) >= max(32, chunk_size)]
+        min_len = chunk_size if args.mode == "crop" else window_bp
+        sequences = [seq for seq in sequences if len(seq) >= max(32, min_len)]
     else:
         raise ValueError("Provide --fasta, --sequences-file, or --smoke-test.")
 
@@ -457,10 +457,12 @@ def main():
     print(f"  Precision                : {dtype}")
     objective = "crop SimCSE" if args.mode == "crop" else "reverse-complement SimCSE"
     print(f"  Objective                : {objective} + symmetric InfoNCE")
-    print(f"  Crop size                : {chunk_size} bp")
     if args.mode == "crop":
+        print(f"  Crop size                : {chunk_size} bp")
         print(f"  Overlap ratio            : {args.overlap_ratio:.0%}")
         print(f"  Max crop shift           : {max_shift} bp")
+    else:
+        print(f"  Revcomp window           : {args.max_length * 4} bp")
     print(f"  Temperature              : {args.temperature}")
     print(f"  Projection dim           : {args.proj_dim}")
 
@@ -499,7 +501,6 @@ def main():
     else:
         collator = RevCompPairCollator(
             tokenizer=tokenizer,
-            chunk_size=chunk_size,
             max_length=args.max_length,
         )
 
