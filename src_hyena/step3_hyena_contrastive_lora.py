@@ -1,11 +1,13 @@
 """
-HyenaDNA Step 3: crop-SimCSE contrastive adaptation.
+HyenaDNA Step 3: contrastive adaptation.
 
 H5: H2 adapted with two overlapping crops from the same genomic window,
     trained with symmetric InfoNCE. This is intentionally a full fine-tune
     analogue of the current HyenaDNA Step 2 implementation rather than a LoRA
     implementation; HyenaDNA does not share DNAGPT's attention-projection
     module structure.
+
+H4: H2 adapted with a sequence and its reverse complement as the positive pair.
 """
 
 from __future__ import annotations
@@ -41,6 +43,13 @@ from common import (  # noqa: E402
     save_hyena_checkpoint,
 )
 from hyena_bidirectional import inspect_hyenadna_bidirectional, make_hyenadna_bidirectional  # noqa: E402
+
+
+_RC_TABLE = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+
+
+def reverse_complement(seq: str) -> str:
+    return seq.translate(_RC_TABLE)[::-1].upper()
 
 
 class RawSequenceDataset(TorchDataset):
@@ -111,6 +120,55 @@ class CropPairCollator:
             seq[start_a : start_a + self.chunk_size],
             seq[start_b : start_b + self.chunk_size],
         )
+
+    def _attention_mask(self, encoding) -> torch.Tensor:
+        if "attention_mask" in encoding:
+            return encoding["attention_mask"]
+
+        input_ids = encoding["input_ids"]
+        pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            return torch.ones_like(input_ids, dtype=torch.long)
+        return input_ids.ne(int(pad_token_id)).long()
+
+    def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
+        seqs_a, seqs_b = [], []
+        for feature in features:
+            a, b = self._make_pair(feature["sequence"])
+            seqs_a.append(a)
+            seqs_b.append(b)
+
+        enc_a = self.tokenizer(
+            seqs_a,
+            truncation=True,
+            max_length=self.max_length,
+            padding="longest",
+            return_tensors="pt",
+        )
+        enc_b = self.tokenizer(
+            seqs_b,
+            truncation=True,
+            max_length=self.max_length,
+            padding="longest",
+            return_tensors="pt",
+        )
+        return {
+            "input_ids_a": enc_a["input_ids"],
+            "attention_mask_a": self._attention_mask(enc_a),
+            "input_ids_b": enc_b["input_ids"],
+            "attention_mask_b": self._attention_mask(enc_b),
+        }
+
+
+@dataclass
+class RevCompPairCollator:
+    tokenizer: object
+    chunk_size: int
+    max_length: int
+
+    def _make_pair(self, seq: str) -> tuple[str, str]:
+        seq = seq[: self.chunk_size].upper()
+        return seq, reverse_complement(seq)
 
     def _attention_mask(self, encoding) -> torch.Tensor:
         if "attention_mask" in encoding:
@@ -283,7 +341,7 @@ def build_training_args(args) -> TrainingArguments:
         prediction_loss_only=True,
         report_to=[] if args.no_wandb else ["wandb"],
         seed=args.seed,
-        run_name=args.run_name or f"hyena_step3_crop_s{args.seed}",
+        run_name=args.run_name or f"hyena_step3_{args.mode}_s{args.seed}",
         bf16=bf16_ok,
         bf16_full_eval=bf16_ok,
         gradient_checkpointing=False,
@@ -296,7 +354,7 @@ def build_training_args(args) -> TrainingArguments:
 def load_contrastive_data(args) -> tuple[RawSequenceDataset, RawSequenceDataset]:
     chunk_size = args.chunk_size or args.max_length * 2
     max_shift = int(round(chunk_size * (1.0 - args.overlap_ratio)))
-    window_bp = chunk_size + max_shift
+    window_bp = chunk_size + max_shift if args.mode == "crop" else chunk_size
 
     if args.smoke_test:
         print("  Data source              : synthetic smoke test")
@@ -334,9 +392,10 @@ def load_contrastive_data(args) -> tuple[RawSequenceDataset, RawSequenceDataset]
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="HyenaDNA Step 3: crop-SimCSE contrastive adaptation")
+    p = argparse.ArgumentParser(description="HyenaDNA Step 3: contrastive adaptation")
     p.add_argument("--model", default=DEFAULT_HYENA_MODEL, help="H2 checkpoint or HyenaDNA model id")
     p.add_argument("--output", default="./hyena_h5_crop_contrastive")
+    p.add_argument("--mode", choices=("crop", "revcomp"), default="crop")
 
     data = p.add_mutually_exclusive_group()
     data.add_argument("--fasta", default=None)
@@ -378,6 +437,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.mode == "revcomp" and args.output == "./hyena_h5_crop_contrastive":
+        args.output = "./hyena_h4_revcomp_contrastive"
     set_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -388,16 +449,18 @@ def main():
     max_shift = int(round(chunk_size * (1.0 - args.overlap_ratio)))
 
     print("=" * 72)
-    print("HyenaDNA  |  Step 3: Crop-SimCSE Contrastive Adaptation")
+    print("HyenaDNA  |  Step 3: Contrastive Adaptation")
     print("=" * 72)
     print(f"  Input model              : {args.model}")
     print(f"  Output                   : {args.output}")
     print(f"  Device                   : {device}")
     print(f"  Precision                : {dtype}")
-    print(f"  Objective                : crop SimCSE + symmetric InfoNCE")
+    objective = "crop SimCSE" if args.mode == "crop" else "reverse-complement SimCSE"
+    print(f"  Objective                : {objective} + symmetric InfoNCE")
     print(f"  Crop size                : {chunk_size} bp")
-    print(f"  Overlap ratio            : {args.overlap_ratio:.0%}")
-    print(f"  Max crop shift           : {max_shift} bp")
+    if args.mode == "crop":
+        print(f"  Overlap ratio            : {args.overlap_ratio:.0%}")
+        print(f"  Max crop shift           : {max_shift} bp")
     print(f"  Temperature              : {args.temperature}")
     print(f"  Projection dim           : {args.proj_dim}")
 
@@ -426,12 +489,19 @@ def main():
     print(f"  Train samples            : {len(train_dataset):,}")
     print(f"  Validation samples       : {len(val_dataset):,}")
 
-    collator = CropPairCollator(
-        tokenizer=tokenizer,
-        chunk_size=chunk_size,
-        overlap_ratio=args.overlap_ratio,
-        max_length=args.max_length,
-    )
+    if args.mode == "crop":
+        collator = CropPairCollator(
+            tokenizer=tokenizer,
+            chunk_size=chunk_size,
+            overlap_ratio=args.overlap_ratio,
+            max_length=args.max_length,
+        )
+    else:
+        collator = RevCompPairCollator(
+            tokenizer=tokenizer,
+            chunk_size=chunk_size,
+            max_length=args.max_length,
+        )
 
     os.makedirs(args.output, exist_ok=True)
     training_args = build_training_args(args)
@@ -443,11 +513,12 @@ def main():
         data_collator=collator,
     )
 
-    print("\n[2/4] Training crop-SimCSE adaptation")
+    print(f"\n[2/4] Training {args.mode} SimCSE adaptation")
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
-    print("\n[3/4] Saving H5 checkpoint")
-    model.base_model.config.hyena_training_stage = "H5_crop_contrastive"
+    stage = "H5_crop_contrastive" if args.mode == "crop" else "H4_revcomp_contrastive"
+    print(f"\n[3/4] Saving {stage} checkpoint")
+    model.base_model.config.hyena_training_stage = stage
     model.save_pretrained(args.output)
     tokenizer.save_pretrained(args.output)
     print(f"  Saved H5 checkpoint      : {args.output}")
