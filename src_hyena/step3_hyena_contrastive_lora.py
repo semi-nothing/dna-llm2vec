@@ -112,6 +112,16 @@ class CropPairCollator:
             seq[start_b : start_b + self.chunk_size],
         )
 
+    def _attention_mask(self, encoding) -> torch.Tensor:
+        if "attention_mask" in encoding:
+            return encoding["attention_mask"]
+
+        input_ids = encoding["input_ids"]
+        pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            return torch.ones_like(input_ids, dtype=torch.long)
+        return input_ids.ne(int(pad_token_id)).long()
+
     def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
         seqs_a, seqs_b = [], []
         for feature in features:
@@ -135,9 +145,9 @@ class CropPairCollator:
         )
         return {
             "input_ids_a": enc_a["input_ids"],
-            "attention_mask_a": enc_a["attention_mask"],
+            "attention_mask_a": self._attention_mask(enc_a),
             "input_ids_b": enc_b["input_ids"],
-            "attention_mask_b": enc_b["attention_mask"],
+            "attention_mask_b": self._attention_mask(enc_b),
         }
 
 
