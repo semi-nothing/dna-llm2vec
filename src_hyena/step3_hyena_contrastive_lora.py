@@ -246,14 +246,14 @@ class HyenaContrastiveTrainer(Trainer):
 
 
 def build_training_args(args) -> TrainingArguments:
-    eval_strategy = "steps" if args.max_steps > 0 else "epoch"
+    eval_strategy = "no" if args.no_eval else ("steps" if args.max_steps > 0 else "epoch")
     save_strategy = "steps" if args.max_steps > 0 else "epoch"
     bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
 
     kwargs = dict(
         output_dir=os.path.join(args.output, "trainer_state"),
         per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.eval_batch_size or args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
@@ -278,7 +278,7 @@ def build_training_args(args) -> TrainingArguments:
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         dataloader_num_workers=args.dataloader_num_workers,
-        dataloader_pin_memory=torch.cuda.is_available(),
+        dataloader_pin_memory=torch.cuda.is_available() and not args.no_pin_memory,
         remove_unused_columns=False,
         prediction_loss_only=True,
         report_to=[] if args.no_wandb else ["wandb"],
@@ -356,6 +356,7 @@ def parse_args():
     p.add_argument("--epochs", type=float, default=1.0)
     p.add_argument("--max-steps", type=int, default=1000)
     p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--eval-batch-size", type=int, default=None)
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--weight-decay", type=float, default=0.01)
@@ -366,6 +367,9 @@ def parse_args():
     p.add_argument("--save-steps", type=int, default=200)
     p.add_argument("--eval-steps", type=int, default=200)
     p.add_argument("--dataloader-num-workers", type=int, default=4)
+    p.add_argument("--no-pin-memory", action="store_true")
+    p.add_argument("--no-eval", action="store_true")
+    p.add_argument("--resume-from-checkpoint", default=None)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--run-name", default=None)
     p.add_argument("--no-wandb", action="store_true")
@@ -440,7 +444,7 @@ def main():
     )
 
     print("\n[2/4] Training crop-SimCSE adaptation")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     print("\n[3/4] Saving H5 checkpoint")
     model.base_model.config.hyena_training_stage = "H5_crop_contrastive"
