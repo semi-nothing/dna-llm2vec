@@ -1,13 +1,15 @@
 """
 HyenaDNA Step 3: contrastive adaptation.
 
-H5: H2 adapted with two overlapping crops from the same genomic window,
-    trained with symmetric InfoNCE. This is intentionally a full fine-tune
-    analogue of the current HyenaDNA Step 2 implementation rather than a LoRA
-    implementation; HyenaDNA does not share DNAGPT's attention-projection
-    module structure.
-
+H3: H2 adapted with identical sequence pairs and independent dropout masks.
 H4: H2 adapted with a sequence and its reverse complement as the positive pair.
+H5: H2 adapted with two overlapping crops from the same genomic window.
+H6: H2 adapted with a center crop and a small local shift from the same window.
+
+All variants use symmetric InfoNCE. This is intentionally a full fine-tune
+analogue of the current HyenaDNA Step 2 implementation rather than a LoRA
+implementation; HyenaDNA does not share DNAGPT's attention-projection module
+structure.
 """
 
 from __future__ import annotations
@@ -92,6 +94,71 @@ def _load_fasta_windows(
     return windows
 
 
+def _attention_mask(tokenizer, encoding) -> torch.Tensor:
+    if "attention_mask" in encoding:
+        return encoding["attention_mask"]
+
+    input_ids = encoding["input_ids"]
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_token_id is None:
+        return torch.ones_like(input_ids, dtype=torch.long)
+    return input_ids.ne(int(pad_token_id)).long()
+
+
+def set_dropout(model: nn.Module, p: float) -> int:
+    if not (0.0 <= p < 1.0):
+        raise ValueError("--dropout must be in [0, 1).")
+
+    n_modules = 0
+    for module in model.modules():
+        if isinstance(module, nn.Dropout):
+            module.p = p
+            n_modules += 1
+
+    seen_config_ids: set[int] = set()
+    configs = (getattr(model, "config", None), getattr(getattr(model, "base_model", None), "config", None))
+    for cfg in configs:
+        if cfg is None:
+            continue
+        if id(cfg) in seen_config_ids:
+            continue
+        seen_config_ids.add(id(cfg))
+        for attr in (
+            "dropout",
+            "hidden_dropout_prob",
+            "attention_probs_dropout_prob",
+            "resid_pdrop",
+            "embd_pdrop",
+            "summary_first_dropout",
+        ):
+            if hasattr(cfg, attr):
+                setattr(cfg, attr, p)
+
+    return n_modules
+
+
+@dataclass
+class DropoutPairCollator:
+    tokenizer: object
+    max_length: int
+
+    def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
+        seqs = [feature["sequence"].upper() for feature in features]
+        enc = self.tokenizer(
+            seqs,
+            truncation=True,
+            max_length=self.max_length,
+            padding="longest",
+            return_tensors="pt",
+        )
+        return {
+            "input_ids_a": enc["input_ids"],
+            "attention_mask_a": _attention_mask(self.tokenizer, enc),
+            "input_ids_b": enc["input_ids"].clone(),
+            "attention_mask_b": _attention_mask(self.tokenizer, enc).clone(),
+        }
+
+
 @dataclass
 class CropPairCollator:
     tokenizer: object
@@ -121,16 +188,6 @@ class CropPairCollator:
             seq[start_b : start_b + self.chunk_size],
         )
 
-    def _attention_mask(self, encoding) -> torch.Tensor:
-        if "attention_mask" in encoding:
-            return encoding["attention_mask"]
-
-        input_ids = encoding["input_ids"]
-        pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
-        if pad_token_id is None:
-            return torch.ones_like(input_ids, dtype=torch.long)
-        return input_ids.ne(int(pad_token_id)).long()
-
     def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
         seqs_a, seqs_b = [], []
         for feature in features:
@@ -154,9 +211,9 @@ class CropPairCollator:
         )
         return {
             "input_ids_a": enc_a["input_ids"],
-            "attention_mask_a": self._attention_mask(enc_a),
+            "attention_mask_a": _attention_mask(self.tokenizer, enc_a),
             "input_ids_b": enc_b["input_ids"],
-            "attention_mask_b": self._attention_mask(enc_b),
+            "attention_mask_b": _attention_mask(self.tokenizer, enc_b),
         }
 
 
@@ -169,15 +226,66 @@ class RevCompPairCollator:
         seq = seq.upper()
         return seq, reverse_complement(seq)
 
-    def _attention_mask(self, encoding) -> torch.Tensor:
-        if "attention_mask" in encoding:
-            return encoding["attention_mask"]
+    def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
+        seqs_a, seqs_b = [], []
+        for feature in features:
+            a, b = self._make_pair(feature["sequence"])
+            seqs_a.append(a)
+            seqs_b.append(b)
 
-        input_ids = encoding["input_ids"]
-        pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
-        if pad_token_id is None:
-            return torch.ones_like(input_ids, dtype=torch.long)
-        return input_ids.ne(int(pad_token_id)).long()
+        enc_a = self.tokenizer(
+            seqs_a,
+            truncation=True,
+            max_length=self.max_length,
+            padding="longest",
+            return_tensors="pt",
+        )
+        enc_b = self.tokenizer(
+            seqs_b,
+            truncation=True,
+            max_length=self.max_length,
+            padding="longest",
+            return_tensors="pt",
+        )
+        return {
+            "input_ids_a": enc_a["input_ids"],
+            "attention_mask_a": _attention_mask(self.tokenizer, enc_a),
+            "input_ids_b": enc_b["input_ids"],
+            "attention_mask_b": _attention_mask(self.tokenizer, enc_b),
+        }
+
+
+@dataclass
+class LocalShiftPairCollator:
+    tokenizer: object
+    chunk_size: int
+    max_shift_ratio: float
+    max_length: int
+
+    def __post_init__(self):
+        if not (0.0 <= self.max_shift_ratio < 1.0):
+            raise ValueError("--local-shift-ratio must be in [0, 1).")
+        self.max_shift = int(round(self.chunk_size * self.max_shift_ratio))
+        self.anchor = self.max_shift
+
+    def _make_pair(self, seq: str) -> tuple[str, str]:
+        seq = seq.upper()
+        if len(seq) <= self.chunk_size:
+            crop = seq[: self.chunk_size]
+            return crop, crop
+
+        required_len = self.chunk_size + 2 * self.max_shift
+        if self.max_shift <= 0 or len(seq) < required_len:
+            crop = seq[: self.chunk_size]
+            return crop, crop
+
+        delta = random.randint(-self.max_shift, self.max_shift)
+        start_a = self.anchor
+        start_b = self.anchor + delta
+        return (
+            seq[start_a : start_a + self.chunk_size],
+            seq[start_b : start_b + self.chunk_size],
+        )
 
     def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
         seqs_a, seqs_b = [], []
@@ -202,9 +310,9 @@ class RevCompPairCollator:
         )
         return {
             "input_ids_a": enc_a["input_ids"],
-            "attention_mask_a": self._attention_mask(enc_a),
+            "attention_mask_a": _attention_mask(self.tokenizer, enc_a),
             "input_ids_b": enc_b["input_ids"],
-            "attention_mask_b": self._attention_mask(enc_b),
+            "attention_mask_b": _attention_mask(self.tokenizer, enc_b),
         }
 
 
@@ -353,9 +461,15 @@ def build_training_args(args) -> TrainingArguments:
 def load_contrastive_data(args) -> tuple[RawSequenceDataset, RawSequenceDataset]:
     chunk_size = args.chunk_size or args.max_length * 2
     max_shift = int(round(chunk_size * (1.0 - args.overlap_ratio)))
+    local_shift = int(round(chunk_size * args.local_shift_ratio))
     # HyenaDNA is nucleotide-level, so max_length already corresponds roughly to bp.
     # DNAGPT uses max_length * 4 for BPE-tokenized DNA; that factor is not used here.
-    window_bp = chunk_size + max_shift if args.mode == "crop" else args.max_length
+    if args.mode == "crop":
+        window_bp = chunk_size + max_shift
+    elif args.mode == "local_shift":
+        window_bp = chunk_size + 2 * local_shift
+    else:
+        window_bp = args.max_length
 
     if args.smoke_test:
         print("  Data source              : synthetic smoke test")
@@ -377,7 +491,7 @@ def load_contrastive_data(args) -> tuple[RawSequenceDataset, RawSequenceDataset]
         ]
         if args.filter_n:
             sequences = [seq for seq in sequences if not VALID_BASES.search(seq)]
-        min_len = chunk_size if args.mode == "crop" else window_bp
+        min_len = chunk_size if args.mode in {"crop", "local_shift"} else window_bp
         sequences = [seq for seq in sequences if len(seq) >= max(32, min_len)]
     else:
         raise ValueError("Provide --fasta, --sequences-file, or --smoke-test.")
@@ -397,7 +511,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="HyenaDNA Step 3: contrastive adaptation")
     p.add_argument("--model", default=DEFAULT_HYENA_MODEL, help="H2 checkpoint or HyenaDNA model id")
     p.add_argument("--output", default="./hyena_h5_crop_contrastive")
-    p.add_argument("--mode", choices=("crop", "revcomp"), default="crop")
+    p.add_argument("--mode", choices=("dropout", "revcomp", "crop", "local_shift"), default="crop")
 
     data = p.add_mutually_exclusive_group()
     data.add_argument("--fasta", default=None)
@@ -411,6 +525,8 @@ def parse_args():
 
     p.add_argument("--chunk-size", type=int, default=None, help="Nucleotide length of each crop.")
     p.add_argument("--overlap-ratio", type=float, default=0.5)
+    p.add_argument("--local-shift-ratio", type=float, default=0.1)
+    p.add_argument("--dropout", type=float, default=0.3, help="Dropout probability used for H3.")
     p.add_argument("--temperature", type=float, default=0.05)
     p.add_argument("--proj-dim", type=int, default=256)
 
@@ -439,8 +555,14 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.mode == "revcomp" and args.output == "./hyena_h5_crop_contrastive":
-        args.output = "./hyena_h4_revcomp_contrastive"
+    if args.output == "./hyena_h5_crop_contrastive":
+        default_outputs = {
+            "dropout": "./hyena_h3_dropout_contrastive",
+            "revcomp": "./hyena_h4_revcomp_contrastive",
+            "crop": "./hyena_h5_crop_contrastive",
+            "local_shift": "./hyena_h6_local_shift_contrastive",
+        }
+        args.output = default_outputs[args.mode]
     set_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -449,6 +571,7 @@ def main():
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
     chunk_size = args.chunk_size or args.max_length * 2
     max_shift = int(round(chunk_size * (1.0 - args.overlap_ratio)))
+    local_shift = int(round(chunk_size * args.local_shift_ratio))
 
     print("=" * 72)
     print("HyenaDNA  |  Step 3: Contrastive Adaptation")
@@ -457,12 +580,26 @@ def main():
     print(f"  Output                   : {args.output}")
     print(f"  Device                   : {device}")
     print(f"  Precision                : {dtype}")
-    objective = "crop SimCSE" if args.mode == "crop" else "reverse-complement SimCSE"
+    objective_names = {
+        "dropout": "dropout SimCSE",
+        "revcomp": "reverse-complement SimCSE",
+        "crop": "crop SimCSE",
+        "local_shift": "local-shift SimCSE",
+    }
+    objective = objective_names[args.mode]
     print(f"  Objective                : {objective} + symmetric InfoNCE")
-    if args.mode == "crop":
+    if args.mode == "dropout":
+        print(f"  Dropout                  : {args.dropout}")
+        print(f"  Window                   : {args.max_length} bp")
+    elif args.mode == "crop":
         print(f"  Crop size                : {chunk_size} bp")
         print(f"  Overlap ratio            : {args.overlap_ratio:.0%}")
         print(f"  Max crop shift           : {max_shift} bp")
+    elif args.mode == "local_shift":
+        print(f"  Crop size                : {chunk_size} bp")
+        print(f"  Local shift ratio        : {args.local_shift_ratio:.0%}")
+        print(f"  Max local shift          : {local_shift} bp")
+        print(f"  Window                   : {chunk_size + 2 * local_shift} bp")
     else:
         print(f"  Revcomp window           : {args.max_length} bp")
     print(f"  Temperature              : {args.temperature}")
@@ -486,6 +623,9 @@ def main():
         proj_dim=args.proj_dim,
         temperature=args.temperature,
     ).to(device=device, dtype=dtype)
+    if args.mode == "dropout":
+        n_dropout = set_dropout(model, args.dropout)
+        print(f"  Dropout modules patched  : {n_dropout}")
     print(f"  Trainable parameters     : {count_trainable_parameters_m(model):.2f}M")
 
     print("\n[1/4] Loading contrastive data")
@@ -493,11 +633,23 @@ def main():
     print(f"  Train samples            : {len(train_dataset):,}")
     print(f"  Validation samples       : {len(val_dataset):,}")
 
-    if args.mode == "crop":
+    if args.mode == "dropout":
+        collator = DropoutPairCollator(
+            tokenizer=tokenizer,
+            max_length=args.max_length,
+        )
+    elif args.mode == "crop":
         collator = CropPairCollator(
             tokenizer=tokenizer,
             chunk_size=chunk_size,
             overlap_ratio=args.overlap_ratio,
+            max_length=args.max_length,
+        )
+    elif args.mode == "local_shift":
+        collator = LocalShiftPairCollator(
+            tokenizer=tokenizer,
+            chunk_size=chunk_size,
+            max_shift_ratio=args.local_shift_ratio,
             max_length=args.max_length,
         )
     else:
@@ -519,12 +671,18 @@ def main():
     print(f"\n[2/4] Training {args.mode} SimCSE adaptation")
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
-    stage = "H5_crop_contrastive" if args.mode == "crop" else "H4_revcomp_contrastive"
+    stages = {
+        "dropout": "H3_dropout_contrastive",
+        "revcomp": "H4_revcomp_contrastive",
+        "crop": "H5_crop_contrastive",
+        "local_shift": "H6_local_shift_contrastive",
+    }
+    stage = stages[args.mode]
     print(f"\n[3/4] Saving {stage} checkpoint")
     model.base_model.config.hyena_training_stage = stage
     model.save_pretrained(args.output)
     tokenizer.save_pretrained(args.output)
-    print(f"  Saved H5 checkpoint      : {args.output}")
+    print(f"  Saved checkpoint         : {args.output}")
 
     print("\n[4/4] Smoke embedding check")
     model.eval()
