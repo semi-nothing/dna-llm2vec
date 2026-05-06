@@ -516,6 +516,40 @@ uv run python src_hyena/step3_hyena_contrastive_lora.py \
   --run-name hyena_h4_revcomp_full_s42_r1
 ```
 
+## HyenaDNA Evaluation Pipeline
+
+### Step 4: Frozen Linear Probe
+
+Step 4 evaluates frozen HyenaDNA representations with mean pooling and a
+lightweight linear probe. The example below evaluates H4 on all configured
+benchmark suites, including GUE+ EPI with an 8192 bp junction crop.
+
+```bash
+uv run python src_hyena/step4_hyena_evaluate.py \
+  --models \
+    "H4:./hyena_h4_revcomp_contrastive_s42_r1:encoder" \
+  --gue-plus-dir ./data/GUE_plus \
+  --epi-crop-mode junction \
+  --epi-crop-bp 8192 \
+  --batch-size 128 \
+  --max-length 8192 \
+  --pooling mean \
+  --gb-root /data/home/bty252/.genomic_benchmarks \
+  --benchmark-cache-dir ./cache/benchmarks \
+  --seed 42 \
+  --no-wandb \
+  --output ./eval_results/step4_hyena_h4_all_s42.json
+```
+
+To evaluate H0--H6 together, add the corresponding model specifications to
+`--models`, using the format:
+
+```text
+"NAME:PATH:MODE"
+```
+
+where `MODE` is `encoder` for bidirectional/adapted HyenaDNA checkpoints.
+
 ## Notes
 
 - Use `--filter-n` to exclude windows containing ambiguous bases.
