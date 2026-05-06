@@ -485,6 +485,7 @@ def main():
     )
 
     os.makedirs(args.output, exist_ok=True)
+    tokenizer.save_pretrained(args.output)
     training_args = build_training_args(args)
 
     trainer = HyenaTrainer(
@@ -493,6 +494,7 @@ def main():
         train_dataset=datasets["train"],
         eval_dataset=datasets["validation"],
         data_collator=collator,
+        processing_class=tokenizer,
     )
 
     print("\n[2/4] Training span-masked MNTP adaptation")

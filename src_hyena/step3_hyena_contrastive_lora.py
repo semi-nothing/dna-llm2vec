@@ -659,6 +659,7 @@ def main():
         )
 
     os.makedirs(args.output, exist_ok=True)
+    tokenizer.save_pretrained(args.output)
     training_args = build_training_args(args)
     trainer = HyenaContrastiveTrainer(
         model=model,
@@ -666,6 +667,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=collator,
+        processing_class=tokenizer,
     )
 
     print(f"\n[2/4] Training {args.mode} SimCSE adaptation")

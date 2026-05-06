@@ -26,13 +26,48 @@ def resolve_path(model_name_or_path: str) -> str:
 
 
 def load_hyena_tokenizer(model_name_or_path: str):
-    tokenizer = AutoTokenizer.from_pretrained(
-        resolve_path(model_name_or_path),
-        trust_remote_code=True,
+    path = resolve_path(model_name_or_path)
+    errors: list[str] = []
+
+    for use_fast in (True, False):
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                path,
+                trust_remote_code=True,
+                use_fast=use_fast,
+            )
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            return tokenizer
+        except Exception as e:
+            errors.append(f"{path} (use_fast={use_fast}) failed: {e}")
+
+    if os.path.exists(model_name_or_path):
+        # HyenaDNA checkpoints can occasionally save model weights cleanly while
+        # leaving tokenizer metadata in a form that AutoTokenizer cannot reload
+        # as a local fast tokenizer. The original tokenizer is sufficient for
+        # Stage 3 and downstream encoding because no masked tokens are used.
+        for use_fast in (True, False):
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    DEFAULT_HYENA_MODEL,
+                    trust_remote_code=True,
+                    use_fast=use_fast,
+                )
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                print(
+                    "  Warning: failed to load tokenizer from local checkpoint; "
+                    f"using tokenizer from {DEFAULT_HYENA_MODEL} instead."
+                )
+                return tokenizer
+            except Exception as e:
+                errors.append(f"{DEFAULT_HYENA_MODEL} (use_fast={use_fast}) failed: {e}")
+
+    raise RuntimeError(
+        "Could not load HyenaDNA tokenizer. If this is a local checkpoint, "
+        "confirm the path exists from the job working directory.\n" + "\n".join(errors)
     )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
 
 
 def _mask_hidden_states(hidden_states: torch.Tensor, attention_mask: torch.Tensor | None) -> torch.Tensor:
