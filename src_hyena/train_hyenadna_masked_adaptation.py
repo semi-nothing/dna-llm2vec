@@ -185,6 +185,8 @@ def build_training_args(args) -> TrainingArguments:
         bf16_full_eval=bf16_ok,
         gradient_checkpointing=False,
     )
+    if "data_seed" in inspect.signature(TrainingArguments.__init__).parameters:
+        kwargs["data_seed"] = args.seed
     if "save_safetensors" in inspect.signature(TrainingArguments.__init__).parameters:
         kwargs["save_safetensors"] = False
     return TrainingArguments(**kwargs)
@@ -420,6 +422,7 @@ def main():
     print(f"  Train mode               : {args.train_mode}")
     print(f"  Masking mode             : {args.masking_mode}")
     print(f"  Mask probability         : {args.mask_probability}")
+    print(f"  Seed                     : {args.seed}")
     print("  Objective                : span-masked MNTP (LLM2Vec-style shift)")
     print(f"  Dataloader workers       : {args.dataloader_num_workers}")
     print(f"  Report to                : {args.report_to}")
