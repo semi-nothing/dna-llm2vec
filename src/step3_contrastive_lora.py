@@ -465,6 +465,7 @@ class DNAGPTForContrastiveLora(nn.Module):
         os.makedirs(save_dir, exist_ok=True)
         if merge:
             merged = self.peft_model.merge_and_unload()   # GPT2LMHeadModel
+            merged.config.update(self.config.to_dict())
             merged.save_pretrained(save_dir)
         else:
             self.peft_model.save_pretrained(save_dir)
@@ -755,6 +756,10 @@ def parse_args():
     # Model / data
     p.add_argument("--model",            required=True)
     p.add_argument("--output",           required=True)
+    p.add_argument("--attention-mode", choices=["bidir", "causal"], default="bidir",
+                   help="Attention mask used during contrastive training. "
+                        "Default 'bidir' preserves the main M3-M6 pipeline. "
+                        "Use 'causal' for M0+contrastive ablations.")
     p.add_argument("--fasta",            default=None)
     p.add_argument("--dataset",          default=None)
     p.add_argument("--sequence-column",  default="sequence")
@@ -846,6 +851,7 @@ def main():
         print(f"  GPU  : {torch.cuda.get_device_name(0)}")
         print(f"  VRAM : {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     print(f"  Mode : {args.mode}  |  τ={args.temperature}  |  proj_dim={args.proj_dim}")
+    print(f"  Attention : {args.attention_mode}")
     print(f"  LoRA : r={args.lora_r}, alpha={args.lora_alpha}")
     if args.mode == "dropout":
         print(f"  Dropout : {args.dropout}  (overrides DNAGPT default 0.1)")
@@ -871,7 +877,7 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # ── 2. Load base model + apply LoRA ──────────────────────────────────────
-    print(f"\n[2/5] Loading MNTP model + applying LoRA")
+    print(f"\n[2/5] Loading base model + applying LoRA")
 
     # Load on CPU, move to device manually avoids device_map dispatch issues
     base = AutoModelForCausalLM.from_pretrained(
@@ -879,7 +885,11 @@ def main():
         torch_dtype=dtype,
         attn_implementation="eager",
     )
-    base = patch_to_bidirectional(base)
+    if args.attention_mode == "bidir":
+        base = patch_to_bidirectional(base)
+    else:
+        base.config.is_causal = True
+        base.config.is_bidirectional = False
 
     lora_config = build_lora_config(args)
     model = DNAGPTForContrastiveLora(
@@ -974,6 +984,9 @@ def main():
 
     # ── Save merged encoder (no projection head) ──────────────────────────────
     print(f"\n  Merging LoRA and saving encoder to: {args.output}")
+    model.config.dna_llm2vec_attention_mode = args.attention_mode
+    model.config.is_causal = args.attention_mode == "causal"
+    model.config.is_bidirectional = args.attention_mode == "bidir"
     model.save_pretrained(args.output, merge=True)
     tokenizer.save_pretrained(args.output)
 
@@ -985,7 +998,7 @@ def main():
         f"\nStep 3 (LoRA) complete.\n"
         f"Encoder saved to: {args.output}\n"
         f"(Projection head discarded use the encoder directly for embeddings.)\n"
-        f"Next step: python src/step4_evaluate.py --models 'M4:{args.output}:bidir'"
+        f"Next step: python src/step4_evaluate.py --models 'C0:{args.output}:{args.attention_mode if args.attention_mode == 'causal' else 'bidir'}'"
     )
 
 
