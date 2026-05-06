@@ -331,15 +331,190 @@ uv run python src/step5_full_finetune_eval.py \
 
 ## HyenaDNA Branch
 
-The HyenaDNA branch follows the same conceptual stages (H0--H6), but uses
-Hyena-specific scripts in `src_hyena/`:
+The HyenaDNA branch follows the same conceptual stages (H0--H6), using
+Hyena-specific scripts in `src_hyena/`. HyenaDNA uses nucleotide-level
+tokenisation and longer sequence windows than DNAGPT; the examples below use
+`--max-length 8192`.
 
-- `src_hyena/step1_hyena.py`
-- `src_hyena/train_hyenadna_masked_adaptation.py`
-- `src_hyena/step3_hyena_contrastive_lora.py`
+The HyenaDNA branch produces variants H0--H6:
 
-HyenaDNA commands will be added here after the final training commands are
-fixed.
+| Variant | Description |
+| --- | --- |
+| H0 | Original causal HyenaDNA checkpoint |
+| H1 | Bidirectional patch |
+| H2 | Masked-adapted bidirectional model |
+| H3 | Dropout SimCSE |
+| H4 | Reverse-complement SimCSE |
+| H5 | Crop SimCSE |
+| H6 | Local-shift SimCSE |
+
+### Stage 1: Open Bidirectional HyenaDNA
+
+This stage converts the public HyenaDNA checkpoint into a bidirectional
+checkpoint without downstream supervision.
+
+```bash
+uv run python src_hyena/step1_hyena.py \
+  --model LongSafari/hyenadna-small-32k-seqlen-hf \
+  --output ./hyena_bidir_h1 \
+  --max-length 8192
+```
+
+Output:
+
+```text
+./hyena_bidir_h1
+```
+
+### Stage 2: Masked Adaptation
+
+This stage trains the bidirectional HyenaDNA model with span masking. Unlike the
+DNAGPT branch, the HyenaDNA branch uses full-model adaptation in this stage.
+
+Example for seed 42:
+
+```bash
+uv run python src_hyena/train_hyenadna_masked_adaptation.py \
+  --model ./hyena_bidir_h1 \
+  --output ./hyena_h2_masked_adapted_ep1_s42_r1 \
+  --fasta ./data/hg38.fa \
+  --filter-n \
+  --max-length 8192 \
+  --stride 4096 \
+  --masking-mode span \
+  --mask-probability 0.15 \
+  --span-min-length 3 \
+  --span-max-length 20 \
+  --train-mode full \
+  --batch-size 32 \
+  --grad-accum 2 \
+  --lr 1e-4 \
+  --warmup-steps 500 \
+  --epochs 1 \
+  --max-steps -1 \
+  --save-steps 200 \
+  --eval-steps 200 \
+  --logging-steps 20 \
+  --seed 42 \
+  --run-name hyena_h2_mntp_full_s42_r1
+```
+
+Repeat with the corresponding output names and seeds for `s43_r2` and `s44_r3`.
+
+### Stage 3: HyenaDNA Contrastive Adaptation
+
+Stage 3 starts from an H2 checkpoint and trains one of four contrastive variants.
+All examples below use seed 42 / repeat 1; adjust `--model`, `--output`,
+`--seed`, and `--run-name` for other seeds.
+
+#### H5: Crop SimCSE
+
+```bash
+uv run python src_hyena/step3_hyena_contrastive_lora.py \
+  --model ./hyena_h2_masked_adapted_ep1_s42_r1 \
+  --output ./hyena_h5_crop_contrastive_ep1_s42_r1 \
+  --fasta ./data/hg38.fa \
+  --filter-n \
+  --mode crop \
+  --max-length 8192 \
+  --stride 4096 \
+  --chunk-size 8192 \
+  --overlap-ratio 0.5 \
+  --temperature 0.05 \
+  --batch-size 16 \
+  --grad-accum 2 \
+  --lr 1e-5 \
+  --weight-decay 0.01 \
+  --warmup-steps 100 \
+  --epochs 1 \
+  --max-steps -1 \
+  --save-steps 200 \
+  --eval-steps 200 \
+  --logging-steps 20 \
+  --gradient-checkpointing \
+  --no-pin-memory \
+  --no-eval \
+  --seed 42 \
+  --run-name hyena_h5_crop_full_s42_r1
+```
+
+#### H3: Dropout SimCSE
+
+```bash
+uv run python src_hyena/step3_hyena_contrastive_lora.py \
+  --model ./hyena_h2_masked_adapted_ep1_s42_r1 \
+  --output ./hyena_h3_dropout_contrastive_ep1_s42_r1 \
+  --fasta ./data/hg38.fa \
+  --filter-n \
+  --mode dropout \
+  --max-length 8192 \
+  --stride 4096 \
+  --batch-size 16 \
+  --grad-accum 2 \
+  --lr 1e-5 \
+  --epochs 1 \
+  --max-steps -1 \
+  --no-pin-memory \
+  --no-eval \
+  --seed 42 \
+  --run-name hyena_h3_dropout_full_s42_r1
+```
+
+#### H6: Local-Shift SimCSE
+
+```bash
+uv run python src_hyena/step3_hyena_contrastive_lora.py \
+  --model ./hyena_h2_masked_adapted_ep1_s42_r1 \
+  --output ./hyena_h6_local_shift_contrastive_ep1_s42_r1 \
+  --fasta ./data/hg38.fa \
+  --filter-n \
+  --mode local_shift \
+  --max-length 8192 \
+  --stride 4096 \
+  --chunk-size 8192 \
+  --temperature 0.05 \
+  --batch-size 16 \
+  --grad-accum 2 \
+  --lr 1e-5 \
+  --epochs 1 \
+  --max-steps -1 \
+  --gradient-checkpointing \
+  --no-pin-memory \
+  --no-eval \
+  --seed 42 \
+  --run-name hyena_h6_local_shift_full_s42_r1
+```
+
+#### H4: Reverse-Complement SimCSE
+
+```bash
+uv run python src_hyena/step3_hyena_contrastive_lora.py \
+  --model ./hyena_h2_masked_adapted_ep1_s42_r1 \
+  --output ./hyena_h4_revcomp_contrastive_ep1_s42_r1 \
+  --fasta ./data/hg38.fa \
+  --filter-n \
+  --mode revcomp \
+  --max-length 8192 \
+  --stride 4096 \
+  --chunk-size 8192 \
+  --overlap-ratio 0.5 \
+  --temperature 0.05 \
+  --batch-size 16 \
+  --grad-accum 2 \
+  --lr 1e-5 \
+  --weight-decay 0.01 \
+  --warmup-steps 100 \
+  --epochs 1 \
+  --max-steps -1 \
+  --save-steps 200 \
+  --eval-steps 200 \
+  --logging-steps 20 \
+  --gradient-checkpointing \
+  --no-pin-memory \
+  --no-eval \
+  --seed 42 \
+  --run-name hyena_h4_revcomp_full_s42_r1
+```
 
 ## Notes
 
