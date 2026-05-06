@@ -411,8 +411,8 @@ class HyenaContrastiveTrainer(Trainer):
 
 
 def build_training_args(args) -> TrainingArguments:
-    eval_strategy = "no" if args.no_eval else ("steps" if args.max_steps > 0 else "epoch")
-    save_strategy = "steps" if args.max_steps > 0 else "epoch"
+    eval_strategy = "no" if args.no_eval else ("steps" if args.eval_steps > 0 else "epoch")
+    save_strategy = "steps" if args.save_steps > 0 else "epoch"
     bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
 
     kwargs = dict(

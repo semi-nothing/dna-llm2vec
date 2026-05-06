@@ -143,12 +143,8 @@ class HyenaTrainer(Trainer):
 
 def build_training_args(args) -> TrainingArguments:
     bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-    if args.max_steps > 0:
-        eval_strategy = "steps"
-        save_strategy = "steps"
-    else:
-        eval_strategy = "epoch"
-        save_strategy = "epoch"
+    eval_strategy = "steps" if args.eval_steps > 0 else "epoch"
+    save_strategy = "steps" if args.save_steps > 0 else "epoch"
 
     kwargs = dict(
         output_dir=os.path.join(args.output, "trainer_state"),
