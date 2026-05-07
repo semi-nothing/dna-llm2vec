@@ -351,7 +351,12 @@ class HyenaDNAForCropContrastive(nn.Module):
         return (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
 
     def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        out = self.base_model(
+        # Use the Hyena backbone directly when the checkpoint is loaded as a
+        # CausalLM. Calling the LM wrapper with output_hidden_states=False returns
+        # logits only, while output_hidden_states=True keeps every layer output in
+        # memory. The backbone path returns just the final hidden state.
+        encoder = self.base_model.hyena if hasattr(self.base_model, "hyena") else self.base_model
+        out = encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=False,
@@ -518,6 +523,9 @@ def parse_args():
     data.add_argument("--fasta", default=None)
     data.add_argument("--sequences-file", default=None, help="Plain-text file with one DNA sequence per line")
     data.add_argument("--smoke-test", action="store_true")
+    p.add_argument("--hidden-path-sanity-check", action="store_true",
+                   help="Compare old LM-wrapper all-hidden-state extraction with "
+                        "the memory-efficient Hyena-backbone final-hidden path, then exit.")
 
     p.add_argument("--filter-n", action="store_true")
     p.add_argument("--max-length", type=int, default=1024)
@@ -552,6 +560,66 @@ def parse_args():
     p.add_argument("--run-name", default=None)
     p.add_argument("--no-wandb", action="store_true")
     return p.parse_args()
+
+
+def hidden_path_sanity_check(args, model, tokenizer, device: str, dtype: torch.dtype):
+    model.eval()
+    seq_len = min(args.max_length, 512)
+    sequences = [
+        ("ACGT" * ((seq_len // 4) + 1))[:seq_len],
+        ("TGCA" * ((seq_len // 4) + 1))[:seq_len],
+    ]
+    enc = tokenizer(
+        sequences,
+        truncation=True,
+        max_length=args.max_length,
+        padding="max_length",
+        return_tensors="pt",
+    )
+    enc = {k: v.to(device) for k, v in enc.items()}
+    attention_mask = enc.get("attention_mask")
+    if attention_mask is None:
+        pad_token_id = getattr(tokenizer, "pad_token_id", None)
+        attention_mask = torch.ones_like(enc["input_ids"]) if pad_token_id is None else (enc["input_ids"] != pad_token_id).long()
+
+    wrapper = HyenaDNAForCropContrastive(
+        base_model=model,
+        proj_dim=0,
+        temperature=args.temperature,
+    ).to(device=device, dtype=dtype)
+
+    with torch.inference_mode():
+        old_out = model(
+            input_ids=enc["input_ids"],
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        old_hidden = extract_hidden_states(old_out)
+        old_pooled = F.normalize(wrapper._mean_pool(old_hidden, attention_mask), dim=-1)
+
+        encoder = model.hyena if hasattr(model, "hyena") else model
+        new_out = encoder(
+            input_ids=enc["input_ids"],
+            attention_mask=attention_mask,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+        new_hidden = extract_hidden_states(new_out)
+        new_pooled = F.normalize(wrapper._mean_pool(new_hidden, attention_mask), dim=-1)
+
+    max_abs = (old_pooled - new_pooled).abs().max().item()
+    mean_abs = (old_pooled - new_pooled).abs().mean().item()
+    cos = F.cosine_similarity(old_pooled, new_pooled, dim=-1)
+    print("\n[Sanity] Hidden extraction path comparison")
+    print(f"  Old hidden shape         : {tuple(old_hidden.shape)}")
+    print(f"  New hidden shape         : {tuple(new_hidden.shape)}")
+    print(f"  Max abs diff             : {max_abs:.8e}")
+    print(f"  Mean abs diff            : {mean_abs:.8e}")
+    print(f"  Cosine similarity        : {[round(float(x), 8) for x in cos]}")
+    if max_abs > 1e-3:
+        raise RuntimeError("Hidden path sanity check failed: old/new embeddings differ unexpectedly.")
+    print("  Result                   : PASSED")
 
 
 def main():
@@ -617,6 +685,10 @@ def main():
     report = inspect_hyenadna_bidirectional(base_model)
     print(f"  HyenaFilter modules      : {report.total_hyena_filters}")
     print(f"  Forward-patched modules  : {report.modules_forward_patched}")
+
+    if args.hidden_path_sanity_check:
+        hidden_path_sanity_check(args, base_model, tokenizer, device, dtype)
+        return
 
     if hasattr(base_model, "gradient_checkpointing_enable") and args.gradient_checkpointing:
         base_model.gradient_checkpointing_enable()
