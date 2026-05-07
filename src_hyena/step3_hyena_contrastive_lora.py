@@ -19,6 +19,7 @@ import inspect
 import os
 import random
 import sys
+import gc
 from dataclasses import dataclass
 from typing import Optional
 
@@ -353,7 +354,7 @@ class HyenaDNAForCropContrastive(nn.Module):
         out = self.base_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            output_hidden_states=True,
+            output_hidden_states=False,
             return_dict=True,
         )
         hidden = extract_hidden_states(out)
@@ -604,6 +605,9 @@ def main():
         print(f"  Revcomp window           : {args.max_length} bp")
     print(f"  Temperature              : {args.temperature}")
     print(f"  Projection dim           : {args.proj_dim}")
+    print(f"  Max steps / epochs       : {args.max_steps} / {args.epochs}")
+    print(f"  Save steps               : {args.save_steps}")
+    print(f"  Eval                     : {'disabled' if args.no_eval else f'every {args.eval_steps} steps'}")
 
     tokenizer = load_hyena_tokenizer(args.model)
     base_model, load_path = load_hyena_causal_lm(args.model, device=device, dtype=dtype)
@@ -671,7 +675,8 @@ def main():
     )
 
     print(f"\n[2/4] Training {args.mode} SimCSE adaptation")
-    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    train_result = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    print(f"  Trainer finished         : global_step={trainer.state.global_step}", flush=True)
 
     stages = {
         "dropout": "H3_dropout_contrastive",
@@ -682,9 +687,19 @@ def main():
     stage = stages[args.mode]
     print(f"\n[3/4] Saving {stage} checkpoint")
     model.base_model.config.hyena_training_stage = stage
+    if hasattr(model.base_model.config, "save_pretrained"):
+        model.base_model.config.save_pretrained(args.output)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
     model.save_pretrained(args.output)
     tokenizer.save_pretrained(args.output)
-    print(f"  Saved checkpoint         : {args.output}")
+    expected_model = os.path.join(args.output, "pytorch_model.bin")
+    if not os.path.isfile(expected_model):
+        raise RuntimeError(f"Expected model file was not created: {expected_model}")
+    print(f"  Saved checkpoint         : {args.output}", flush=True)
+    print(f"  Model file               : {expected_model}", flush=True)
+    print(f"  Train loss               : {train_result.training_loss:.6f}", flush=True)
 
     print("\n[4/4] Smoke embedding check")
     model.eval()
