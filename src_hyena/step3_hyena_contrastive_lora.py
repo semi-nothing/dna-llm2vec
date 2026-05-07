@@ -387,6 +387,19 @@ class HyenaDNAForCropContrastive(nn.Module):
         loss = self.info_nce_loss(z_a, z_b, self.temperature)
         return type("ContrastiveOutput", (), {"loss": loss, "z_a": z_a, "z_b": z_b})()
 
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        if hasattr(self.base_model, "gradient_checkpointing_enable"):
+            if gradient_checkpointing_kwargs is None:
+                self.base_model.gradient_checkpointing_enable()
+            else:
+                self.base_model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
+                )
+
+    def gradient_checkpointing_disable(self):
+        if hasattr(self.base_model, "gradient_checkpointing_disable"):
+            self.base_model.gradient_checkpointing_disable()
+
     def save_pretrained(self, save_dir: str):
         os.makedirs(save_dir, exist_ok=True)
         save_hyena_checkpoint(self.base_model, None, save_dir)
