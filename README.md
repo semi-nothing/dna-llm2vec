@@ -246,6 +246,48 @@ using the format:
 where `MODE` is `causal` for M0 and `bidir` for bidirectional/adapted
 checkpoints.
 
+### DGEB-DNA Frozen Embedding Evaluation
+
+DGEB is an optional external embedding benchmark. Install it only when running
+the DGEB evaluation:
+
+```bash
+uv pip install dgeb
+```
+
+The script below evaluates frozen DNA representations on the recommended
+DGEB-DNA subset. DGEB uses its own task-specific evaluators, such as
+phylogenetic distance similarity and clustering, rather than the repository's
+linear-probe code.
+
+```bash
+uv run python src/step4_dgeb_evaluate.py \
+  --models \
+    "M0:dnagpt/human_gpt2-v1:causal" \
+    "M5:./contrastive_dnagpt_crop_lora_fn_mask_only_s42_r1:bidir" \
+  --task-set recommended \
+  --batch-size 128 \
+  --max-length 1024 \
+  --pooling mean \
+  --seed 42 \
+  --output ./eval_results/dgeb_dna_s42
+```
+
+HyenaDNA checkpoints can be evaluated in the same script using `hyena` mode:
+
+```bash
+uv run python src/step4_dgeb_evaluate.py \
+  --models \
+    "H0:LongSafari/hyenadna-small-32k-seqlen-hf:hyena" \
+    "H5:./hyena_h5_crop_contrastive_ep1_s42_r1:hyena" \
+  --task-set recommended \
+  --batch-size 32 \
+  --hyena-max-length 8192 \
+  --pooling mean \
+  --seed 42 \
+  --output ./eval_results/dgeb_dna_hyena_s42
+```
+
 ### Step 5: LoRA Fine-Tuning
 
 Step 5 LoRA fine-tunes a task-specific LoRA head for each downstream task while
