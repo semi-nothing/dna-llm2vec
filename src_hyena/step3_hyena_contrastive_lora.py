@@ -440,7 +440,6 @@ def build_training_args(args) -> TrainingArguments:
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
         save_total_limit=2,
-        eval_strategy=eval_strategy,
         save_strategy=save_strategy,
         # Checkpoints save the Hyena backbone for Step 4 compatibility rather
         # than the transient contrastive wrapper, so avoid Trainer reloading
@@ -457,9 +456,14 @@ def build_training_args(args) -> TrainingArguments:
         run_name=args.run_name or f"hyena_step3_{args.mode}_s{args.seed}",
         bf16=bf16_ok,
         bf16_full_eval=bf16_ok,
-        gradient_checkpointing=False,
+        gradient_checkpointing=args.gradient_checkpointing,
     )
-    if "save_safetensors" in inspect.signature(TrainingArguments.__init__).parameters:
+    training_args_params = inspect.signature(TrainingArguments.__init__).parameters
+    if "eval_strategy" in training_args_params:
+        kwargs["eval_strategy"] = eval_strategy
+    else:
+        kwargs["evaluation_strategy"] = eval_strategy
+    if "save_safetensors" in training_args_params:
         kwargs["save_safetensors"] = False
     return TrainingArguments(**kwargs)
 
@@ -490,11 +494,12 @@ def load_contrastive_data(args) -> tuple[RawSequenceDataset, RawSequenceDataset]
         )
     elif args.sequences_file:
         print(f"  Data source              : {args.sequences_file}")
-        sequences = [
-            line.strip().upper()
-            for line in open(args.sequences_file, "r", encoding="utf-8")
-            if line.strip()
-        ]
+        with open(args.sequences_file, "r", encoding="utf-8") as handle:
+            sequences = [
+                line.strip().upper()
+                for line in handle
+                if line.strip()
+            ]
         if args.filter_n:
             sequences = [seq for seq in sequences if not VALID_BASES.search(seq)]
         min_len = chunk_size if args.mode in {"crop", "local_shift"} else window_bp

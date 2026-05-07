@@ -165,7 +165,6 @@ def build_training_args(args) -> TrainingArguments:
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
         save_total_limit=2,
-        eval_strategy=eval_strategy,
         save_strategy=save_strategy,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
@@ -179,11 +178,16 @@ def build_training_args(args) -> TrainingArguments:
         run_name=args.run_name,
         bf16=bf16_ok,
         bf16_full_eval=bf16_ok,
-        gradient_checkpointing=False,
+        gradient_checkpointing=args.gradient_checkpointing,
     )
-    if "data_seed" in inspect.signature(TrainingArguments.__init__).parameters:
+    training_args_params = inspect.signature(TrainingArguments.__init__).parameters
+    if "eval_strategy" in training_args_params:
+        kwargs["eval_strategy"] = eval_strategy
+    else:
+        kwargs["evaluation_strategy"] = eval_strategy
+    if "data_seed" in training_args_params:
         kwargs["data_seed"] = args.seed
-    if "save_safetensors" in inspect.signature(TrainingArguments.__init__).parameters:
+    if "save_safetensors" in training_args_params:
         kwargs["save_safetensors"] = False
     return TrainingArguments(**kwargs)
 
