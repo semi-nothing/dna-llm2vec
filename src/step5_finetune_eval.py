@@ -348,6 +348,12 @@ class DNAClassifier(nn.Module):
         self.classifier = nn.Linear(hidden_dim, n_classes)
 
     def forward(self, input_ids, attention_mask):
+        if not hasattr(self.backbone, "transformer"):
+            raise TypeError(
+                "DNAClassifier in step5_finetune_eval.py expects a GPT-2-style "
+                "backbone with a .transformer module. Use an architecture-specific "
+                "Step 5 wrapper for non-GPT backbones."
+            )
         out    = self.backbone.transformer(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -504,7 +510,7 @@ def train_one_task(
         metric = f1 if source in ("gue", "gue+") else acc
         if metric > best_metric:
             best_metric = metric
-            best_state = copy.deepcopy(classifier.state_dict())
+            best_state = {k: v.detach().cpu() for k, v in classifier.state_dict().items()}
 
         primary = "F1" if source in ("gue", "gue+") else "acc"
         pval    = metric
