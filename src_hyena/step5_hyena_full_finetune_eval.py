@@ -62,6 +62,7 @@ from common import (  # noqa: E402
     load_hyena_tokenizer,
     mean_pool_embeddings,
 )
+from hyena_bidirectional import maybe_activate_hyenadna_bidirectional  # noqa: E402
 
 
 @dataclass
@@ -124,7 +125,10 @@ class HyenaDNAClassifier(nn.Module):
 
     def __init__(self, backbone, n_classes: int, hidden_dim: int):
         super().__init__()
-        self.backbone = backbone
+        # The shared training loop deep-copies the loaded base model per task.
+        # Re-activate the non-serialized Hyena bidirectional forward patch on
+        # that copy to keep H1/H2/H3... behaviour consistent after deepcopy.
+        self.backbone = maybe_activate_hyenadna_bidirectional(backbone)
         self.classifier = nn.Linear(hidden_dim, n_classes)
 
     def forward(self, input_ids, attention_mask):
