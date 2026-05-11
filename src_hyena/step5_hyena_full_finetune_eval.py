@@ -63,6 +63,7 @@ from common import (  # noqa: E402
     mean_pool_embeddings,
 )
 from hyena_bidirectional import maybe_activate_hyenadna_bidirectional  # noqa: E402
+from hyena_bidirectional import inspect_hyenadna_bidirectional  # noqa: E402
 
 
 @dataclass
@@ -218,6 +219,7 @@ def load_base_model(spec: HyenaModelSpec, device: str, dtype):
     tokenizer = load_hyena_tokenizer(path)
     model, load_path = load_hyena_backbone(path, device="cpu", dtype=dtype)
     _attach_gradient_checkpointing_enable(model)
+    bidir_report = inspect_hyenadna_bidirectional(model)
 
     hidden_dim = _infer_hidden_dim(model)
     # The shared Step 5 trainer expects config.n_embd when constructing the head.
@@ -228,6 +230,10 @@ def load_base_model(spec: HyenaModelSpec, device: str, dtype):
     model.eval()
     print(f"    Load path  : {load_path}")
     print(f"    Parameters : {count_parameters_m(model):.1f}M  |  hidden: {hidden_dim}  |  vocab: {len(tokenizer):,}")
+    print(
+        "    Bidir patch: "
+        f"{bidir_report.modules_forward_patched}/{bidir_report.total_hyena_filters} filters patched"
+    )
     return model, tokenizer
 
 
