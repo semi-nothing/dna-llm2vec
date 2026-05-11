@@ -134,11 +134,19 @@ def encode_sequences(
                 else:
                     attention_mask = (enc["input_ids"] != pad_token_id).long()
 
-            out = model(
-                input_ids=enc["input_ids"],
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-            )
+            try:
+                out = model(
+                    input_ids=enc["input_ids"],
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                )
+            except TypeError as e:
+                if "attention_mask" not in str(e):
+                    raise
+                out = model(
+                    input_ids=enc["input_ids"],
+                    output_hidden_states=True,
+                )
 
             if hasattr(out, "last_hidden_state") and out.last_hidden_state is not None:
                 hidden = out.last_hidden_state
