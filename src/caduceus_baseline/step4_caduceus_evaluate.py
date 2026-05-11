@@ -126,10 +126,17 @@ def encode_sequences(
                 return_tensors="pt",
             )
             enc = {k: v.to(device) for k, v in enc.items()}
+            attention_mask = enc.get("attention_mask")
+            if attention_mask is None:
+                pad_token_id = tokenizer.pad_token_id
+                if pad_token_id is None:
+                    attention_mask = torch.ones_like(enc["input_ids"], dtype=torch.long)
+                else:
+                    attention_mask = (enc["input_ids"] != pad_token_id).long()
 
             out = model(
                 input_ids=enc["input_ids"],
-                attention_mask=enc["attention_mask"],
+                attention_mask=attention_mask,
                 output_hidden_states=True,
             )
 
@@ -147,7 +154,7 @@ def encode_sequences(
 
             pooled = base.pool_hidden_states(
                 hidden=hidden,
-                attention_mask=enc["attention_mask"],
+                attention_mask=attention_mask,
                 input_ids=enc["input_ids"],
                 pooling=pooling,
                 eos_token_id=tokenizer.eos_token_id,
@@ -155,7 +162,7 @@ def encode_sequences(
             pooled = F.normalize(pooled, dim=-1)
 
         all_embeddings.append(pooled.cpu().float().numpy())
-        del enc, out, hidden, pooled
+        del enc, attention_mask, out, hidden, pooled
 
     return np.concatenate(all_embeddings, axis=0)
 
