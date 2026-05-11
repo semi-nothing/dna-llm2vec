@@ -27,6 +27,8 @@ dependencies = [
     "matplotlib>=3.10.9",
     "umap-learn>=0.5.12",
     "dgeb>=0.2.0",
+    "packaging>=26.1",
+    "ninja>=1.13.0",
 ]
 
 [project.optional-dependencies]
