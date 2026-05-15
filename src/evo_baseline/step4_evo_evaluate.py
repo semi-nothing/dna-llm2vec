@@ -153,6 +153,7 @@ def encode_sequences(
                 out = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
+                    use_cache=False,
                     output_hidden_states=True,
                 )
             except TypeError as e:
@@ -160,6 +161,7 @@ def encode_sequences(
                     raise
                 out = model(
                     input_ids=input_ids,
+                    use_cache=False,
                     output_hidden_states=True,
                 )
 
@@ -175,6 +177,8 @@ def encode_sequences(
 
         all_embeddings.append(pooled.cpu().float().numpy())
         del enc, input_ids, attention_mask, out, hidden, pooled
+        if device == "cuda":
+            torch.cuda.empty_cache()
 
     return np.concatenate(all_embeddings, axis=0)
 
