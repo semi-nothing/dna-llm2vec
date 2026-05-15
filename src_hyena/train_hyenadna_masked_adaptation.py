@@ -328,6 +328,7 @@ def smoke_test(args):
         config=SpanMaskingConfig(
             mask_probability=args.mask_probability,
             masking_mode=args.masking_mode,
+            replacement_policy=args.replacement_policy,
             span_min_length=args.span_min_length,
             span_max_length=args.span_max_length,
         ),
@@ -370,6 +371,12 @@ def parse_args():
 
     p.add_argument("--mask-probability", type=float, default=0.15)
     p.add_argument("--masking-mode", choices=["single", "span"], default="span")
+    p.add_argument(
+        "--replacement-policy",
+        choices=["all_mask", "bert", "mask_random"],
+        default="all_mask",
+        help="Replacement policy for selected mask targets.",
+    )
     p.add_argument("--span-min-length", type=int, default=3)
     p.add_argument("--span-max-length", type=int, default=20)
 
@@ -422,6 +429,7 @@ def main():
     print(f"  Train mode               : {args.train_mode}")
     print(f"  Masking mode             : {args.masking_mode}")
     print(f"  Mask probability         : {args.mask_probability}")
+    print(f"  Replacement policy       : {args.replacement_policy}")
     print(f"  Seed                     : {args.seed}")
     print("  Objective                : span-masked MNTP (LLM2Vec-style shift)")
     print(f"  Dataloader workers       : {args.dataloader_num_workers}")
@@ -482,6 +490,7 @@ def main():
         config=SpanMaskingConfig(
             mask_probability=args.mask_probability,
             masking_mode=args.masking_mode,
+            replacement_policy=args.replacement_policy,
             span_min_length=args.span_min_length,
             span_max_length=args.span_max_length,
         ),

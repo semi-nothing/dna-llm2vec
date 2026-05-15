@@ -19,6 +19,7 @@ class SpanMaskingConfig:
     masking_mode: str = "span"   # "single" | "span"
     span_min_length: int = 3
     span_max_length: int = 20
+    replacement_policy: str = "all_mask"  # "all_mask" | "bert" | "mask_random"
 
 
 def _select_single_mask_positions(valid_positions: list[int], mask_probability: float) -> set[int]:
@@ -58,8 +59,37 @@ class HyenaDNASpanMaskingCollator:
     def __init__(self, tokenizer, config: SpanMaskingConfig):
         if tokenizer.mask_token_id is None:
             raise ValueError("Tokenizer must define a dedicated mask token before masking.")
+        if config.replacement_policy not in {"all_mask", "bert", "mask_random"}:
+            raise ValueError(f"Unsupported replacement_policy={config.replacement_policy!r}")
         self.tokenizer = tokenizer
         self.config = config
+        base_ids = [
+            tokenizer.convert_tokens_to_ids(base)
+            for base in ("A", "C", "G", "T")
+        ]
+        self.random_token_ids = torch.tensor(
+            [int(token_id) for token_id in base_ids if token_id is not None],
+            dtype=torch.long,
+        )
+        if len(self.random_token_ids) != 4:
+            raise ValueError("HyenaDNA random replacement requires single-token A/C/G/T ids.")
+
+    def _apply_replacement_policy(self, input_ids: torch.Tensor, idx: torch.Tensor) -> None:
+        policy = self.config.replacement_policy
+        if policy == "all_mask":
+            input_ids[idx] = self.tokenizer.mask_token_id
+            return
+
+        probs = torch.rand(idx.numel(), device=input_ids.device)
+        mask_positions = probs < (0.8 if policy == "bert" else 0.9)
+        if mask_positions.any():
+            input_ids[idx[mask_positions]] = self.tokenizer.mask_token_id
+
+        random_positions = (probs >= 0.8) & (probs < 0.9) if policy == "bert" else probs >= 0.9
+        if random_positions.any():
+            choices = self.random_token_ids.to(device=input_ids.device)
+            rand_idx = torch.randint(0, choices.numel(), (int(random_positions.sum()),), device=input_ids.device)
+            input_ids[idx[random_positions]] = choices[rand_idx]
 
     def _mask_one(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, special_tokens_mask: torch.Tensor):
         input_ids = input_ids.clone()
@@ -89,7 +119,7 @@ class HyenaDNASpanMaskingCollator:
         if masked_positions:
             idx = torch.tensor(sorted(masked_positions), dtype=torch.long)
             labels[idx] = input_ids[idx]
-            input_ids[idx] = self.tokenizer.mask_token_id
+            self._apply_replacement_policy(input_ids, idx)
 
         return input_ids, labels
 
