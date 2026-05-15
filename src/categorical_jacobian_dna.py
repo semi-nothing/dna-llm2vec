@@ -53,6 +53,8 @@ DNA_BASES = ("A", "C", "G", "T")
 def _load_wrapper(name: str):
     if name == "generic":
         return step4.load_model
+    if name == "dnagpt":
+        return load_dnagpt
     if name == "maskedlm":
         return load_masked_lm
     if name == "dnabert2":
@@ -68,6 +70,29 @@ def _load_wrapper(name: str):
 
         return wrapper.load_model
     raise ValueError(f"Unknown loader {name!r}")
+
+
+def load_dnagpt(spec, device: str, dtype):
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from step1_bidirectional import patch_to_bidirectional
+
+    path = os.path.abspath(spec.path) if os.path.exists(spec.path) else spec.path
+    print(f"  Loading {spec.name}  ({path}, dnagpt loader, mode={spec.mode})")
+    tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True, use_fast=False)
+    ensure_padding(tokenizer)
+
+    model = AutoModelForCausalLM.from_pretrained(
+        path,
+        torch_dtype=dtype,
+        attn_implementation="eager",
+    )
+    if spec.mode == "bidir":
+        model = patch_to_bidirectional(model)
+    model = model.to(device=device)
+    model.eval()
+    n_params = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"    Parameters : {n_params:.1f}M  |  vocab: {len(tokenizer):,}")
+    return model, tokenizer
 
 
 def load_masked_lm(spec, device: str, dtype):
@@ -339,7 +364,7 @@ def parse_args():
     p.add_argument("--model", required=True, help="Model spec: name:path:mode")
     p.add_argument(
         "--loader",
-        choices=("generic", "maskedlm", "dnabert2", "caduceus", "evo"),
+        choices=("generic", "dnagpt", "maskedlm", "dnabert2", "caduceus", "evo"),
         default="generic",
         help="Optional Step4 wrapper loader for fragile remote-code models.",
     )
