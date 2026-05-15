@@ -68,6 +68,26 @@ def block_stats(contact: np.ndarray, junction: int):
     return rows
 
 
+def preprocess_contact(contact: np.ndarray, mask_diagonal: int, apc: bool):
+    x = contact.astype(np.float32).copy()
+    if mask_diagonal > 0:
+        idx = np.arange(x.shape[0])
+        mask = np.abs(idx[:, None] - idx[None, :]) < mask_diagonal
+        x[mask] = np.nan
+
+    if apc:
+        row_mean = np.nanmean(x, axis=1, keepdims=True)
+        col_mean = np.nanmean(x, axis=0, keepdims=True)
+        global_mean = np.nanmean(x)
+        if np.isfinite(global_mean) and abs(float(global_mean)) > 1e-8:
+            x = x - (row_mean @ col_mean) / global_mean
+        else:
+            x = x - row_mean - col_mean + global_mean
+        if mask_diagonal > 0:
+            x[mask] = np.nan
+    return x
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--inputs", nargs="+", required=True, help="Input .npz files")
@@ -75,13 +95,19 @@ def main():
     p.add_argument("--junction", type=int, default=None, help="0-based matrix index for enhancer/promoter split")
     p.add_argument("--percentile", type=float, default=99.0)
     p.add_argument("--symmetric", action="store_true", help="Use symmetric color limits around zero")
+    p.add_argument("--mask-diagonal", type=int, default=0, help="Mask |i-j| < N before plotting/statistics")
+    p.add_argument("--apc", action="store_true", help="Apply average-product correction after optional diagonal masking")
     p.add_argument("--cmap", default="RdBu_r")
     p.add_argument("--dpi", type=int, default=220)
     args = p.parse_args()
 
     import matplotlib.pyplot as plt
 
-    items = load_contacts(args.inputs)
+    raw_items = load_contacts(args.inputs)
+    items = [
+        (label, path, preprocess_contact(contact, args.mask_diagonal, args.apc))
+        for label, path, contact in raw_items
+    ]
     vmin, vmax = shared_limits([x for _, _, x in items], args.percentile, args.symmetric)
     os.makedirs(os.path.dirname(os.path.abspath(args.output_prefix)), exist_ok=True)
 

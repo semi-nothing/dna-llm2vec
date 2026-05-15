@@ -77,11 +77,9 @@ def _crop_sequence(seq: str, max_bp: int, mode: str, anchor: int | None = None) 
 
 
 def _read_epi_csv(path: str, label: int | None, index: int, crop_bp: int, crop_mode: str):
-    import csv as _csv
-
     matched = 0
     with open(path, newline="", encoding="utf-8") as fh:
-        reader = _csv.DictReader(fh)
+        reader = csv.DictReader(fh)
         for row in reader:
             row_label = int(row["label"])
             if label is not None and row_label != label:
@@ -227,28 +225,24 @@ def delta_to_contact(delta: np.ndarray, metric: str, diag: str, apc: bool):
     valid = np.isfinite(delta).all(axis=2)
     filled = np.where(np.isfinite(delta), delta, 0.0)
     num_pos = delta.shape[0]
-    contact = np.zeros((num_pos, num_pos), dtype=np.float32)
 
     if metric == "effect_norm":
         scores = np.sqrt(np.square(filled).sum(axis=2))
         counts = valid.sum(axis=1).clip(min=1)
         effect = scores.sum(axis=1) / counts
         contact = np.sqrt(effect[:, None] * effect[None, :]).astype(np.float32)
+    elif metric == "dot":
+        weighted = filled * valid[..., None]
+        contact = np.einsum("iad,jad->ij", weighted, weighted, optimize=True)
+        counts = (valid[:, None, :] & valid[None, :, :]).sum(axis=2).clip(min=1)
+        contact = (contact / counts).astype(np.float32)
     else:
-        for i in range(num_pos):
-            for j in range(num_pos):
-                vals = []
-                for a in range(delta.shape[1]):
-                    if not (valid[i, a] and valid[j, a]):
-                        continue
-                    vi = filled[i, a]
-                    vj = filled[j, a]
-                    if metric == "dot":
-                        vals.append(float(np.dot(vi, vj)))
-                    else:
-                        denom = np.linalg.norm(vi) * np.linalg.norm(vj)
-                        vals.append(float(np.dot(vi, vj) / denom)) if denom > 1e-12 else vals.append(0.0)
-                contact[i, j] = float(np.mean(vals)) if vals else 0.0
+        norms = np.linalg.norm(filled, axis=2, keepdims=True)
+        unit = filled / np.clip(norms, 1e-12, None)
+        unit = unit * valid[..., None]
+        contact = np.einsum("iad,jad->ij", unit, unit, optimize=True)
+        counts = (valid[:, None, :] & valid[None, :, :]).sum(axis=2).clip(min=1)
+        contact = (contact / counts).astype(np.float32)
 
     if diag == "remove":
         np.fill_diagonal(contact, 0.0)
@@ -317,6 +311,7 @@ def parse_args():
     p.add_argument("--end-bp", type=int, default=None, help="1-based inclusive end position")
     p.add_argument("--pooling", choices=("mean", "weighted_mean", "last", "cls", "eos"), default="mean")
     p.add_argument("--metric", choices=("cosine", "dot", "effect_norm"), default="cosine")
+    p.add_argument("--diag", choices=("remove", "keep"), default="remove")
     p.add_argument("--fp32", action="store_true")
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--no-apc", action="store_true")
@@ -329,13 +324,7 @@ def parse_args():
     return p.parse_args()
 
 
-def run_one(args, sequence: str, suffix: str = ""):
-    device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
-    dtype = torch.float32 if args.fp32 or device == "cpu" else torch.bfloat16
-    spec = step4.ModelSpec.parse(args.model)
-    model, tokenizer = _load_wrapper(args.loader)(spec, device, dtype)
-    ensure_padding(tokenizer)
-
+def run_one(args, sequence: str, model, tokenizer, spec, device: str, source_meta: dict | None = None, suffix: str = ""):
     alphabet = tuple(base.upper() for base in args.alphabet)
     positions = mutable_bp_positions(sequence, alphabet)
     start_idx = max(args.start_bp - 1, 0)
@@ -360,7 +349,7 @@ def run_one(args, sequence: str, suffix: str = ""):
     for emb, (pos, _original, new_base) in zip(mutant_emb, metadata):
         delta[pos_to_idx[pos], base_to_idx[new_base]] = emb - base_emb
 
-    contact = delta_to_contact(delta, metric=args.metric, diag="remove", apc=not args.no_apc)
+    contact = delta_to_contact(delta, metric=args.metric, diag=args.diag, apc=not args.no_apc)
     prefix = args.output_prefix + suffix
     os.makedirs(os.path.dirname(os.path.abspath(prefix)), exist_ok=True)
     np.savez_compressed(
@@ -382,10 +371,11 @@ def run_one(args, sequence: str, suffix: str = ""):
         "include_self": args.include_self,
         "pooling": args.pooling,
         "metric": args.metric,
+        "diag": args.diag,
         "max_length": args.max_length,
     }
-    if hasattr(args, "source_meta"):
-        meta["source"] = args.source_meta
+    if source_meta:
+        meta["source"] = source_meta
     with open(f"{prefix}.meta.json", "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2)
     print(f"Wrote {prefix}.npz/.csv/.png/.meta.json")
@@ -415,12 +405,19 @@ def main():
             f"crop={len(sequence)}",
             f"junction_in_crop={source_meta['junction_in_crop']}",
         )
-    args.source_meta = source_meta
-    contact = run_one(args, sequence)
+    device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
+    dtype = torch.float32 if args.fp32 or device == "cpu" else torch.bfloat16
+    spec = step4.ModelSpec.parse(args.model)
+    model, tokenizer = _load_wrapper(args.loader)(spec, device, dtype)
+    ensure_padding(tokenizer)
+
+    contact = run_one(args, sequence, model, tokenizer, spec, device, source_meta=source_meta)
 
     if args.rc_consistency:
         rc_sequence = reverse_complement(sequence)
-        rc_contact = run_one(args, rc_sequence, suffix="_rc")
+        rc_meta = dict(source_meta)
+        rc_meta["source_type"] = f"{rc_meta.get('source_type', 'sequence')}_reverse_complement"
+        rc_contact = run_one(args, rc_sequence, model, tokenizer, spec, device, source_meta=rc_meta, suffix="_rc")
         flipped = rc_contact[::-1, ::-1]
         n = min(contact.shape[0], flipped.shape[0])
         corr = float(np.corrcoef(contact[:n, :n].ravel(), flipped[:n, :n].ravel())[0, 1])
