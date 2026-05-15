@@ -72,7 +72,12 @@ def load_model(spec, device: str, dtype):
         revision=revision,
     )
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        # Some Evo remote-code revisions expose a ByteTokenizer without special
+        # tokens. Reuse an existing byte token for padding so the embedding
+        # matrix does not need to be resized.
+        tokenizer.pad_token = tokenizer.eos_token if tokenizer.eos_token is not None else " "
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = " "
 
     config = AutoConfig.from_pretrained(
         path,

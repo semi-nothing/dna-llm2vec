@@ -431,6 +431,12 @@ def train_one_task(
 
     # Optimizer: all backbone params + classifier head.
     trainable  = [p for p in classifier.parameters() if p.requires_grad]
+    n_trainable = sum(p.numel() for p in trainable)
+    n_total = sum(p.numel() for p in classifier.parameters())
+    print(
+        f"    trainable params={n_trainable/1e6:.2f}M / "
+        f"total params={n_total/1e6:.2f}M"
+    )
     optimizer  = torch.optim.AdamW(trainable, lr=args.lr,
                                    weight_decay=args.weight_decay)
     steps_per_epoch = max(1, (len(train_dl) + args.grad_accum - 1) // args.grad_accum)
@@ -446,6 +452,7 @@ def train_one_task(
     best_state = None
     best_epoch = 0
     epochs_without_improvement = 0
+    history = []
 
     for epoch in range(args.epochs):
         # ── train ──────────────────────────────────────────────────────────
@@ -475,22 +482,27 @@ def train_one_task(
         # ── eval ───────────────────────────────────────────────────────────
         classifier.eval()
         all_preds, all_labels = [], []
+        total_val_loss = 0.0
         with torch.inference_mode():
             for batch in val_dl:
                 input_ids      = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 labels         = batch["labels"].to(device)
                 logits = classifier(input_ids, attention_mask)
+                val_loss = F.cross_entropy(logits, labels)
+                total_val_loss += val_loss.item()
                 preds  = logits.argmax(dim=-1)
                 all_preds.extend(preds.cpu().tolist())
                 all_labels.extend(labels.cpu().tolist())
-                del input_ids, attention_mask, labels, logits, preds
+                del input_ids, attention_mask, labels, logits, val_loss, preds
 
+        avg_val_loss = total_val_loss / len(val_dl)
         acc = float(accuracy_score(all_labels, all_preds))
         f1 = float(f1_score(all_labels, all_preds, average="macro"))
         mcc = float(matthews_corrcoef(all_labels, all_preds))
         metrics = {"accuracy": acc, "f1": f1, "mcc": mcc}
         monitor_val = metrics[monitor_name]
+        current_lr = float(scheduler.get_last_lr()[0])
 
         improved = monitor_val > (best_metric + args.min_delta)
         if improved:
@@ -501,9 +513,24 @@ def train_one_task(
         else:
             epochs_without_improvement += 1
 
+        history.append({
+            "epoch": int(epoch + 1),
+            "train_loss": float(avg_loss),
+            "val_loss": float(avg_val_loss),
+            "val_accuracy": float(acc),
+            "val_f1": float(f1),
+            "val_mcc": float(mcc),
+            "monitor": monitor_name,
+            "monitor_value": float(monitor_val),
+            "lr": current_lr,
+            "is_best": bool(improved),
+        })
+
         print(f"    epoch {epoch+1:02d}/{args.epochs}  "
-              f"loss={avg_loss:.4f}  acc={acc*100:.2f}%  F1={f1*100:.2f}%  "
-              f"MCC={mcc*100:.2f}%  [monitor={monitor_name}:{monitor_val*100:.2f}%]"
+              f"loss={avg_loss:.4f}  val_loss={avg_val_loss:.4f}  "
+              f"acc={acc*100:.2f}%  F1={f1*100:.2f}%  "
+              f"MCC={mcc*100:.2f}%  lr={current_lr:.2e}  "
+              f"[monitor={monitor_name}:{monitor_val*100:.2f}%]"
               + ("  *best" if improved else ""))
 
         if args.patience > 0 and epochs_without_improvement >= args.patience:
@@ -552,6 +579,7 @@ def train_one_task(
         "peak_epoch": int(best_epoch),
         "best_monitor": monitor_name,
         "best_monitor_value": float(best_metric),
+        "history": history,
     }
 
 
