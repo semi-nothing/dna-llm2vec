@@ -61,9 +61,9 @@ def _read_fasta(path: str) -> str:
     return "".join(parts)
 
 
-def _crop_sequence(seq: str, max_bp: int, mode: str, anchor: int | None = None) -> str:
+def _crop_sequence(seq: str, max_bp: int, mode: str, anchor: int | None = None) -> tuple[str, int]:
     if len(seq) <= max_bp:
-        return seq
+        return seq, 0
     if mode == "junction":
         if anchor is None:
             anchor = len(seq) // 2
@@ -73,7 +73,7 @@ def _crop_sequence(seq: str, max_bp: int, mode: str, anchor: int | None = None) 
         start = (len(seq) - max_bp) // 2
     else:
         raise ValueError(f"Unknown crop mode {mode!r}")
-    return seq[start : start + max_bp]
+    return seq[start : start + max_bp], start
 
 
 def _read_epi_csv(path: str, label: int | None, index: int, crop_bp: int, crop_mode: str):
@@ -98,7 +98,7 @@ def _read_epi_csv(path: str, label: int | None, index: int, crop_bp: int, crop_m
                 anchor = None
             if not seq:
                 raise ValueError(f"Selected EPI row in {path} has an empty sequence")
-            crop = _crop_sequence(seq, crop_bp, crop_mode, anchor)
+            crop, crop_start = _crop_sequence(seq, crop_bp, crop_mode, anchor)
             return crop, {
                 "source": path,
                 "label": row_label,
@@ -106,8 +106,11 @@ def _read_epi_csv(path: str, label: int | None, index: int, crop_bp: int, crop_m
                 "full_length": len(seq),
                 "crop_bp": crop_bp,
                 "crop_mode": crop_mode,
+                "crop_start": crop_start,
                 "anchor": anchor,
-                "junction_in_crop": None if anchor is None else min(crop_bp // 2, len(crop)),
+                "junction_in_crop": None
+                if anchor is None
+                else max(0, min(anchor - crop_start, len(crop))),
             }
     raise ValueError(f"No EPI row found in {path} for label={label}, index={index}")
 
@@ -139,6 +142,16 @@ def tokenize_batch(tokenizer, sequences: list[str], max_length: int, device: str
     return {k: v.to(device) for k, v in enc.items()}
 
 
+def attention_mask_or_default(tokenizer, input_ids: torch.Tensor, enc: dict[str, torch.Tensor]):
+    attention_mask = enc.get("attention_mask")
+    if attention_mask is not None:
+        return attention_mask
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        return torch.ones_like(input_ids, dtype=torch.long)
+    return (input_ids != pad_token_id).long()
+
+
 def _evo_backbone_hidden(model, input_ids: torch.Tensor, attention_mask: torch.Tensor | None):
     backbone = getattr(model, "backbone", None)
     if backbone is None:
@@ -150,9 +163,9 @@ def _evo_backbone_hidden(model, input_ids: torch.Tensor, attention_mask: torch.T
     return hidden
 
 
-def forward_hidden(model, enc: dict[str, torch.Tensor]):
+def forward_hidden(model, enc: dict[str, torch.Tensor], tokenizer):
     input_ids = enc["input_ids"]
-    attention_mask = enc.get("attention_mask")
+    attention_mask = attention_mask_or_default(tokenizer, input_ids, enc)
 
     evo_hidden = _evo_backbone_hidden(model, input_ids, attention_mask)
     if evo_hidden is not None:
@@ -165,15 +178,28 @@ def forward_hidden(model, enc: dict[str, torch.Tensor]):
         if attention_mask is not None:
             kwargs["attention_mask"] = attention_mask
         try:
-            out = model(**kwargs, use_cache=False, output_hidden_states=False)
+            out = model(**kwargs, use_cache=False, output_hidden_states=True)
         except TypeError:
-            out = model(**kwargs)
+            out = model(**kwargs, output_hidden_states=True)
 
     if hasattr(out, "last_hidden_state"):
-        return out.last_hidden_state
-    if isinstance(out, tuple):
-        return out[0]
-    raise TypeError(f"Unsupported model output type {type(out)!r}")
+        hidden = out.last_hidden_state
+    elif hasattr(out, "hidden_states") and out.hidden_states is not None:
+        hidden = out.hidden_states[-1]
+    elif isinstance(out, tuple) and torch.is_tensor(out[0]) and out[0].dim() == 3:
+        hidden = out[0]
+    else:
+        raise TypeError(f"Unsupported model output type {type(out)!r}; no hidden states found")
+
+    vocab_size = getattr(getattr(model, "config", None), "vocab_size", None)
+    if vocab_size is not None and hidden.shape[-1] == vocab_size:
+        raise TypeError(
+            "Model output appears to be logits, not hidden states "
+            f"(last dim equals vocab_size={vocab_size})."
+        )
+    if hidden.dim() != 3:
+        raise TypeError(f"Expected hidden states with shape [B, L, D], got {tuple(hidden.shape)}")
+    return hidden
 
 
 @torch.no_grad()
@@ -191,10 +217,11 @@ def encode_pooled(
     for start in range(0, len(sequences), batch_size):
         batch = sequences[start : start + batch_size]
         enc = tokenize_batch(tokenizer, batch, max_length, device)
-        hidden = forward_hidden(model, enc)
+        hidden = forward_hidden(model, enc, tokenizer)
+        attention_mask = attention_mask_or_default(tokenizer, enc["input_ids"], enc)
         pooled = step4.pool_hidden_states(
             hidden=hidden,
-            attention_mask=enc["attention_mask"],
+            attention_mask=attention_mask,
             input_ids=enc["input_ids"],
             pooling=pooling,
             eos_token_id=tokenizer.eos_token_id,
@@ -222,7 +249,8 @@ def build_mutants(sequence: str, positions: list[int], alphabet: tuple[str, ...]
 
 def delta_to_contact(delta: np.ndarray, metric: str, diag: str, apc: bool):
     """delta shape: [L, A, D], with NaNs for skipped substitutions."""
-    valid = np.isfinite(delta).all(axis=2)
+    norms_raw = np.linalg.norm(np.where(np.isfinite(delta), delta, 0.0), axis=2)
+    valid = np.isfinite(delta).all(axis=2) & (norms_raw > 1e-12)
     filled = np.where(np.isfinite(delta), delta, 0.0)
     num_pos = delta.shape[0]
 
@@ -276,8 +304,9 @@ def save_contact_png(path: str, contact: np.ndarray, title: str):
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7, 6), constrained_layout=True)
-    vmax = np.percentile(contact, 99) if np.isfinite(contact).any() else 1.0
-    im = ax.imshow(contact, cmap="Blues", vmin=float(np.min(contact)), vmax=float(vmax))
+    vmax = np.nanpercentile(contact, 99) if np.isfinite(contact).any() else 1.0
+    vmin = np.nanmin(contact) if np.isfinite(contact).any() else 0.0
+    im = ax.imshow(contact, cmap="Blues", vmin=float(vmin), vmax=float(vmax))
     ax.set_title(title)
     ax.set_xlabel("mutable bp index")
     ax.set_ylabel("mutable bp index")
@@ -384,6 +413,18 @@ def run_one(args, sequence: str, model, tokenizer, spec, device: str, source_met
 
 def main():
     args = parse_args()
+    if any(len(base) != 1 for base in args.alphabet):
+        raise ValueError(f"--alphabet entries must be single characters, got {args.alphabet}")
+    if args.rc_consistency and args.max_positions is not None:
+        raise ValueError(
+            "--rc-consistency with --max-positions is not coordinate-aligned. "
+            "Remove --max-positions or run explicit matched windows."
+        )
+    if args.rc_consistency and (args.start_bp != 1 or args.end_bp is not None):
+        raise ValueError(
+            "--rc-consistency with --start-bp/--end-bp is not currently "
+            "coordinate-aligned. Use the full selected sequence for RC checks."
+        )
     source_meta = {}
     if args.sequence is not None:
         sequence = args.sequence.strip()
