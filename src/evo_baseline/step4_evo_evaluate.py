@@ -115,6 +115,19 @@ def _extract_hidden_states(out):
     )
 
 
+def _evo_backbone_hidden(model, input_ids: torch.Tensor, attention_mask: torch.Tensor | None):
+    """Return Evo's final sequence states before the tied vocab projection."""
+    backbone = getattr(model, "backbone", None)
+    if backbone is None:
+        return None
+
+    hidden = backbone.embedding_layer.embed(input_ids)
+    hidden, _ = backbone.stateless_forward(hidden, padding_mask=attention_mask)
+    if backbone.norm is not None:
+        hidden = backbone.norm(hidden)
+    return hidden
+
+
 def encode_sequences(
     model,
     tokenizer,
@@ -150,22 +163,21 @@ def encode_sequences(
                     attention_mask = (input_ids != pad_token_id).long()
 
             try:
+                out = None
+                hidden = _evo_backbone_hidden(model, input_ids, attention_mask)
+            except TypeError as e:
+                if "attention_mask" not in str(e):
+                    raise
+                hidden = _evo_backbone_hidden(model, input_ids, None)
+
+            if hidden is None:
                 out = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     use_cache=False,
                     output_hidden_states=True,
                 )
-            except TypeError as e:
-                if "attention_mask" not in str(e):
-                    raise
-                out = model(
-                    input_ids=input_ids,
-                    use_cache=False,
-                    output_hidden_states=True,
-                )
-
-            hidden = _extract_hidden_states(out)
+                hidden = _extract_hidden_states(out)
             pooled = base.pool_hidden_states(
                 hidden=hidden,
                 attention_mask=attention_mask,
@@ -176,7 +188,9 @@ def encode_sequences(
             pooled = F.normalize(pooled, dim=-1)
 
         all_embeddings.append(pooled.cpu().float().numpy())
-        del enc, input_ids, attention_mask, out, hidden, pooled
+        del enc, input_ids, attention_mask, hidden, pooled
+        if out is not None:
+            del out
         if device == "cuda":
             torch.cuda.empty_cache()
 
