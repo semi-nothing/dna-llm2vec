@@ -61,6 +61,59 @@ def _read_fasta(path: str) -> str:
     return "".join(parts)
 
 
+def _crop_sequence(seq: str, max_bp: int, mode: str, anchor: int | None = None) -> str:
+    if len(seq) <= max_bp:
+        return seq
+    if mode == "junction":
+        if anchor is None:
+            anchor = len(seq) // 2
+        start = anchor - (max_bp // 2)
+        start = max(0, min(start, len(seq) - max_bp))
+    elif mode == "center":
+        start = (len(seq) - max_bp) // 2
+    else:
+        raise ValueError(f"Unknown crop mode {mode!r}")
+    return seq[start : start + max_bp]
+
+
+def _read_epi_csv(path: str, label: int | None, index: int, crop_bp: int, crop_mode: str):
+    import csv as _csv
+
+    matched = 0
+    with open(path, newline="", encoding="utf-8") as fh:
+        reader = _csv.DictReader(fh)
+        for row in reader:
+            row_label = int(row["label"])
+            if label is not None and row_label != label:
+                continue
+            if matched != index:
+                matched += 1
+                continue
+
+            if "enhancer" in row and "promoter" in row:
+                enhancer = row["enhancer"].strip().upper()
+                promoter = row["promoter"].strip().upper()
+                seq = enhancer + promoter
+                anchor = len(enhancer)
+            else:
+                seq = (row.get("sequence") or row.get("seq") or "").strip().upper()
+                anchor = None
+            if not seq:
+                raise ValueError(f"Selected EPI row in {path} has an empty sequence")
+            crop = _crop_sequence(seq, crop_bp, crop_mode, anchor)
+            return crop, {
+                "source": path,
+                "label": row_label,
+                "row_index_within_label": index,
+                "full_length": len(seq),
+                "crop_bp": crop_bp,
+                "crop_mode": crop_mode,
+                "anchor": anchor,
+                "junction_in_crop": None if anchor is None else min(crop_bp // 2, len(crop)),
+            }
+    raise ValueError(f"No EPI row found in {path} for label={label}, index={index}")
+
+
 def reverse_complement(seq: str) -> str:
     return seq.translate(COMPLEMENT)[::-1]
 
@@ -250,6 +303,11 @@ def parse_args():
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--sequence")
     src.add_argument("--fasta")
+    src.add_argument("--epi-csv", help="CSV with enhancer,promoter,label columns")
+    p.add_argument("--epi-label", type=int, choices=(0, 1), default=None)
+    p.add_argument("--epi-index", type=int, default=0, help="0-based row index after optional label filtering")
+    p.add_argument("--epi-crop-bp", type=int, default=1024)
+    p.add_argument("--epi-crop-mode", choices=("center", "junction"), default="junction")
     p.add_argument("--alphabet", nargs="+", default=list(DNA_BASES))
     p.add_argument("--include-self", action="store_true", help="Also evaluate no-op substitutions")
     p.add_argument("--max-length", type=int, default=512)
@@ -315,30 +373,49 @@ def run_one(args, sequence: str, suffix: str = ""):
     )
     save_contact_csv(f"{prefix}.csv", contact, positions, sequence)
     save_contact_png(f"{prefix}.png", contact, f"{spec.name} bp mutagenesis {args.metric}")
+    meta = {
+        "model": asdict(spec),
+        "loader": args.loader,
+        "sequence_length_bp": len(sequence),
+        "selected_positions": len(positions),
+        "alphabet": alphabet,
+        "include_self": args.include_self,
+        "pooling": args.pooling,
+        "metric": args.metric,
+        "max_length": args.max_length,
+    }
+    if hasattr(args, "source_meta"):
+        meta["source"] = args.source_meta
     with open(f"{prefix}.meta.json", "w", encoding="utf-8") as fh:
-        json.dump(
-            {
-                "model": asdict(spec),
-                "loader": args.loader,
-                "sequence_length_bp": len(sequence),
-                "selected_positions": len(positions),
-                "alphabet": alphabet,
-                "include_self": args.include_self,
-                "pooling": args.pooling,
-                "metric": args.metric,
-                "max_length": args.max_length,
-            },
-            fh,
-            indent=2,
-        )
+        json.dump(meta, fh, indent=2)
     print(f"Wrote {prefix}.npz/.csv/.png/.meta.json")
     return contact
 
 
 def main():
     args = parse_args()
-    sequence = args.sequence if args.sequence is not None else _read_fasta(args.fasta)
-    sequence = sequence.strip()
+    source_meta = {}
+    if args.sequence is not None:
+        sequence = args.sequence.strip()
+    elif args.fasta is not None:
+        sequence = _read_fasta(args.fasta).strip()
+        source_meta = {"source": args.fasta, "source_type": "fasta"}
+    else:
+        sequence, source_meta = _read_epi_csv(
+            args.epi_csv,
+            label=args.epi_label,
+            index=args.epi_index,
+            crop_bp=args.epi_crop_bp,
+            crop_mode=args.epi_crop_mode,
+        )
+        print(
+            "Selected EPI sequence:",
+            f"label={source_meta['label']}",
+            f"full_length={source_meta['full_length']}",
+            f"crop={len(sequence)}",
+            f"junction_in_crop={source_meta['junction_in_crop']}",
+        )
+    args.source_meta = source_meta
     contact = run_one(args, sequence)
 
     if args.rc_consistency:
