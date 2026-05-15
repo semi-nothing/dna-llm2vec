@@ -126,6 +126,9 @@ def set_dropout(model: nn.Module, p: float) -> int:
         seen_config_ids.add(id(cfg))
         for attr in (
             "dropout",
+            "embed_dropout",
+            "hyena_dropout",
+            "hyena_filter_dropout",
             "hidden_dropout_prob",
             "attention_probs_dropout_prob",
             "resid_pdrop",
@@ -720,6 +723,12 @@ def main():
     if args.mode == "dropout":
         n_dropout = set_dropout(model, args.dropout)
         print(f"  Dropout modules patched  : {n_dropout}")
+        if n_dropout == 0:
+            raise RuntimeError(
+                "Dropout SimCSE requires stochastic dropout views, but no "
+                "nn.Dropout modules were found in the HyenaDNA model. Check "
+                "the remote-code revision or use a non-dropout contrastive mode."
+            )
     print(f"  Trainable parameters     : {count_trainable_parameters_m(model):.2f}M")
 
     print("\n[1/4] Loading contrastive data")

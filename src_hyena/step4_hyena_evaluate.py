@@ -109,9 +109,7 @@ def encode_sequences(
     return np.concatenate(all_embeddings, axis=0)
 
 
-base.load_model = load_model
-base.encode_sequences = encode_sequences
-
-
 if __name__ == "__main__":
+    base.load_model = load_model
+    base.encode_sequences = encode_sequences
     base.main()

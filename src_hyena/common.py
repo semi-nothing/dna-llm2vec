@@ -42,31 +42,12 @@ def load_hyena_tokenizer(model_name_or_path: str):
         except Exception as e:
             errors.append(f"{path} (use_fast={use_fast}) failed: {e}")
 
-    if os.path.exists(model_name_or_path):
-        # HyenaDNA checkpoints can occasionally save model weights cleanly while
-        # leaving tokenizer metadata in a form that AutoTokenizer cannot reload
-        # as a local fast tokenizer. The original tokenizer is sufficient for
-        # Stage 3 and downstream encoding because no masked tokens are used.
-        for use_fast in (True, False):
-            try:
-                tokenizer = AutoTokenizer.from_pretrained(
-                    DEFAULT_HYENA_MODEL,
-                    trust_remote_code=True,
-                    use_fast=use_fast,
-                )
-                if tokenizer.pad_token is None:
-                    tokenizer.pad_token = tokenizer.eos_token
-                print(
-                    "  Warning: failed to load tokenizer from local checkpoint; "
-                    f"using tokenizer from {DEFAULT_HYENA_MODEL} instead."
-                )
-                return tokenizer
-            except Exception as e:
-                errors.append(f"{DEFAULT_HYENA_MODEL} (use_fast={use_fast}) failed: {e}")
-
     raise RuntimeError(
         "Could not load HyenaDNA tokenizer. If this is a local checkpoint, "
-        "confirm the path exists from the job working directory.\n" + "\n".join(errors)
+        "confirm the path exists from the job working directory and that the "
+        "checkpoint tokenizer files were saved correctly. Refusing to fall back "
+        f"to {DEFAULT_HYENA_MODEL} because that can silently mismatch added "
+        "special tokens such as [MASK].\n" + "\n".join(errors)
     )
 
 
@@ -252,12 +233,12 @@ def _patch_hyena_attention_mask(model) -> None:
 
             loss = None
             if labels is not None:
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-                loss_fct = torch.nn.CrossEntropyLoss()
-                shift_logits = shift_logits.view(-1, self.vocab_size)
-                shift_labels = shift_labels.view(-1).to(shift_logits.device)
-                loss = loss_fct(shift_logits, shift_labels)
+                raise RuntimeError(
+                    "Do not pass labels directly to a bidirectional-patched "
+                    "HyenaDNA causal LM. Use HyenaDNAForMaskedAdaptation or "
+                    "another task-specific wrapper so the loss matches the "
+                    "training objective."
+                )
 
             if not return_dict:
                 output = (logits,) + outputs[1:]
