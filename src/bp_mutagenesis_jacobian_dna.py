@@ -142,6 +142,49 @@ def tokenize_batch(tokenizer, sequences: list[str], max_length: int, device: str
     return {k: v.to(device) for k, v in enc.items()}
 
 
+def token_signatures(
+    tokenizer,
+    sequences: list[str],
+    max_length: int,
+    batch_size: int,
+) -> tuple[list[tuple[int, ...]], list[bool]]:
+    """Return non-padded token ids and whether each sequence hit max_length."""
+    ensure_padding(tokenizer)
+    signatures: list[tuple[int, ...]] = []
+    hit_max_length: list[bool] = []
+    for start in range(0, len(sequences), batch_size):
+        batch = sequences[start : start + batch_size]
+        enc = tokenizer(
+            batch,
+            truncation=True,
+            max_length=max_length,
+            padding="longest",
+            return_tensors="pt",
+        )
+        input_ids = enc["input_ids"]
+        attention_mask = enc.get("attention_mask")
+        if attention_mask is None:
+            pad_token_id = tokenizer.pad_token_id
+            if pad_token_id is None:
+                for row in input_ids:
+                    ids = tuple(int(x) for x in row.tolist())
+                    signatures.append(ids)
+                    hit_max_length.append(len(ids) >= max_length)
+            else:
+                keep = input_ids != pad_token_id
+                for row, row_keep in zip(input_ids, keep):
+                    ids = tuple(int(x) for x in row[row_keep].tolist())
+                    signatures.append(ids)
+                    hit_max_length.append(len(ids) >= max_length)
+        else:
+            keep = attention_mask.bool()
+            for row, row_keep in zip(input_ids, keep):
+                ids = tuple(int(x) for x in row[row_keep].tolist())
+                signatures.append(ids)
+                hit_max_length.append(len(ids) >= max_length)
+    return signatures, hit_max_length
+
+
 def attention_mask_or_default(tokenizer, input_ids: torch.Tensor, enc: dict[str, torch.Tensor]):
     attention_mask = enc.get("attention_mask")
     if attention_mask is not None:
@@ -234,13 +277,13 @@ def encode_pooled(
     return torch.cat(pooled_all, dim=0).numpy()
 
 
-def build_mutants(sequence: str, positions: list[int], alphabet: tuple[str, ...], include_self: bool):
+def build_mutants(sequence: str, positions: list[int], alphabet: tuple[str, ...]):
     mutants: list[str] = []
     metadata: list[tuple[int, str, str]] = []
     for pos in positions:
         original = sequence[pos].upper()
         for base in alphabet:
-            if not include_self and base.upper() == original:
+            if base.upper() == original:
                 continue
             mutants.append(mutate_base(sequence, pos, base))
             metadata.append((pos, original, base.upper()))
@@ -332,7 +375,6 @@ def parse_args():
     p.add_argument("--epi-crop-bp", type=int, default=1024)
     p.add_argument("--epi-crop-mode", choices=("center", "junction"), default="junction")
     p.add_argument("--alphabet", nargs="+", default=list(DNA_BASES))
-    p.add_argument("--include-self", action="store_true", help="Also evaluate no-op substitutions")
     p.add_argument("--max-length", type=int, default=512)
     p.add_argument("--mutant-batch-size", type=int, default=16)
     p.add_argument("--max-positions", type=int, default=None)
@@ -367,7 +409,66 @@ def run_one(args, sequence: str, model, tokenizer, spec, device: str, source_met
     base_emb = encode_pooled(
         model, tokenizer, [sequence], args.max_length, 1, device, args.pooling
     )[0]
-    mutants, metadata = build_mutants(sequence, positions, alphabet, args.include_self)
+    mutants, metadata = build_mutants(sequence, positions, alphabet)
+    candidate_positions = list(positions)
+    candidate_mutants = len(mutants)
+    base_signatures, base_hit_max_length = token_signatures(tokenizer, [sequence], args.max_length, 1)
+    base_signature = base_signatures[0]
+    mutant_signatures, mutant_hit_max_length = token_signatures(
+        tokenizer, mutants, args.max_length, args.mutant_batch_size
+    )
+    mutant_token_lengths = np.array([len(signature) for signature in mutant_signatures], dtype=np.int32)
+    base_token_length = len(base_signature)
+    mutants_hitting_max_length = int(sum(mutant_hit_max_length))
+    print(
+        "Token length after truncation:",
+        f"base={base_token_length}/{args.max_length}",
+        f"mutants min/median/max={int(mutant_token_lengths.min())}/"
+        f"{float(np.median(mutant_token_lengths)):.1f}/{int(mutant_token_lengths.max())}",
+    )
+    if base_hit_max_length[0]:
+        print(
+            "WARNING: base sequence reaches max_length after tokenization; "
+            "right-edge bp mutations may be invisible after truncation."
+        )
+    if mutants_hitting_max_length:
+        print(
+            "WARNING: mutants reaching max_length after tokenization:",
+            f"{mutants_hitting_max_length}/{len(mutants)}",
+            "(BPE boundary changes may create additional truncation).",
+        )
+    visible_pairs = [
+        (mutant, item)
+        for mutant, item, signature in zip(mutants, metadata, mutant_signatures)
+        if signature != base_signature
+    ]
+    skipped_token_identical = len(mutants) - len(visible_pairs)
+    visible_pos_set = {item[0] for _mutant, item in visible_pairs}
+    positions = [pos for pos in positions if pos in visible_pos_set]
+    skipped_token_identical_positions = len(candidate_positions) - len(positions)
+    if skipped_token_identical:
+        print(
+            "Skipped token-identical mutants after truncation:",
+            f"{skipped_token_identical}/{len(mutants)}",
+        )
+    if skipped_token_identical_positions:
+        print(
+            "Removed bp positions with no token-visible substitutions:",
+            f"{skipped_token_identical_positions}/{len(candidate_positions)}",
+        )
+    if not visible_pairs:
+        raise ValueError(
+            "All mutants tokenize identically to the base sequence after truncation. "
+            "Reduce the selected bp range, increase --max-length, or crop the sequence "
+            "before running bp mutagenesis."
+        )
+    if not positions:
+        raise ValueError(
+            "No selected bp positions had token-visible substitutions after truncation. "
+            "Reduce the selected bp range, increase --max-length, or crop the sequence "
+            "before running bp mutagenesis."
+        )
+    mutants, metadata = map(list, zip(*visible_pairs))
     mutant_emb = encode_pooled(
         model, tokenizer, mutants, args.max_length, args.mutant_batch_size, device, args.pooling
     )
@@ -388,6 +489,11 @@ def run_one(args, sequence: str, model, tokenizer, spec, device: str, source_met
         positions=np.array(positions, dtype=np.int32),
         alphabet=np.array(alphabet, dtype=object),
         sequence=np.array(sequence, dtype=object),
+        skipped_token_identical=np.array(skipped_token_identical, dtype=np.int32),
+        skipped_token_identical_positions=np.array(skipped_token_identical_positions, dtype=np.int32),
+        base_token_length=np.array(base_token_length, dtype=np.int32),
+        mutant_token_lengths=mutant_token_lengths,
+        mutants_hitting_max_length=np.array(mutants_hitting_max_length, dtype=np.int32),
     )
     save_contact_csv(f"{prefix}.csv", contact, positions, sequence)
     save_contact_png(f"{prefix}.png", contact, f"{spec.name} bp mutagenesis {args.metric}")
@@ -397,18 +503,29 @@ def run_one(args, sequence: str, model, tokenizer, spec, device: str, source_met
         "sequence_length_bp": len(sequence),
         "selected_positions": len(positions),
         "alphabet": alphabet,
-        "include_self": args.include_self,
         "pooling": args.pooling,
         "metric": args.metric,
         "diag": args.diag,
         "max_length": args.max_length,
+        "base_token_length": base_token_length,
+        "base_hit_max_length": bool(base_hit_max_length[0]),
+        "mutant_token_length_min": int(mutant_token_lengths.min()),
+        "mutant_token_length_median": float(np.median(mutant_token_lengths)),
+        "mutant_token_length_max": int(mutant_token_lengths.max()),
+        "mutants_hitting_max_length": mutants_hitting_max_length,
+        "candidate_positions": len(candidate_positions),
+        "evaluated_positions": len(positions),
+        "skipped_token_identical_positions": skipped_token_identical_positions,
+        "candidate_mutants": candidate_mutants,
+        "evaluated_mutants": len(metadata),
+        "skipped_token_identical": skipped_token_identical,
     }
     if source_meta:
         meta["source"] = source_meta
     with open(f"{prefix}.meta.json", "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2)
     print(f"Wrote {prefix}.npz/.csv/.png/.meta.json")
-    return contact
+    return contact, positions
 
 
 def main():
@@ -452,18 +569,52 @@ def main():
     model, tokenizer = _load_wrapper(args.loader)(spec, device, dtype)
     ensure_padding(tokenizer)
 
-    contact = run_one(args, sequence, model, tokenizer, spec, device, source_meta=source_meta)
+    contact, positions = run_one(args, sequence, model, tokenizer, spec, device, source_meta=source_meta)
 
     if args.rc_consistency:
         rc_sequence = reverse_complement(sequence)
         rc_meta = dict(source_meta)
         rc_meta["source_type"] = f"{rc_meta.get('source_type', 'sequence')}_reverse_complement"
-        rc_contact = run_one(args, rc_sequence, model, tokenizer, spec, device, source_meta=rc_meta, suffix="_rc")
-        flipped = rc_contact[::-1, ::-1]
-        n = min(contact.shape[0], flipped.shape[0])
-        corr = float(np.corrcoef(contact[:n, :n].ravel(), flipped[:n, :n].ravel())[0, 1])
-        np.savez_compressed(f"{args.output_prefix}_rc_compare.npz", contact=contact, rc_flipped=flipped, corr=corr)
-        print(f"RC contact correlation: {corr:.4f}")
+        rc_contact, rc_positions = run_one(
+            args,
+            rc_sequence,
+            model,
+            tokenizer,
+            spec,
+            device,
+            source_meta=rc_meta,
+            suffix="_rc",
+        )
+        rc_pos_to_idx = {pos: idx for idx, pos in enumerate(rc_positions)}
+        aligned = [
+            (fwd_idx, rc_pos_to_idx[len(sequence) - 1 - pos], pos)
+            for fwd_idx, pos in enumerate(positions)
+            if (len(sequence) - 1 - pos) in rc_pos_to_idx
+        ]
+        if len(aligned) < 2:
+            raise ValueError(
+                "RC consistency has fewer than two coordinate-aligned positions after "
+                "token-visible filtering. Increase --max-length or use a shorter window."
+            )
+        fwd_idx = np.array([item[0] for item in aligned], dtype=np.int32)
+        rc_idx = np.array([item[1] for item in aligned], dtype=np.int32)
+        aligned_positions = np.array([item[2] for item in aligned], dtype=np.int32)
+        contact_aligned = contact[np.ix_(fwd_idx, fwd_idx)]
+        rc_flipped_aligned = rc_contact[np.ix_(rc_idx, rc_idx)]
+        corr = float(np.corrcoef(contact_aligned.ravel(), rc_flipped_aligned.ravel())[0, 1])
+        np.savez_compressed(
+            f"{args.output_prefix}_rc_compare.npz",
+            contact_aligned=contact_aligned,
+            rc_flipped_aligned=rc_flipped_aligned,
+            forward_positions=aligned_positions,
+            rc_positions=np.array([len(sequence) - 1 - pos for pos in aligned_positions], dtype=np.int32),
+            corr=corr,
+        )
+        print(
+            "RC contact correlation:",
+            f"{corr:.4f}",
+            f"(aligned positions {len(aligned)}/{len(positions)} forward, {len(rc_positions)} rc)",
+        )
 
 
 if __name__ == "__main__":
