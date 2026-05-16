@@ -479,6 +479,23 @@ def run_one(args, sequence: str, model, tokenizer, spec, device: str, source_met
     for emb, (pos, _original, new_base) in zip(mutant_emb, metadata):
         delta[pos_to_idx[pos], base_to_idx[new_base]] = emb - base_emb
 
+    finite_delta = delta[np.isfinite(delta).all(axis=2)]
+    delta_norms = np.linalg.norm(finite_delta, axis=1) if finite_delta.size else np.array([], dtype=np.float32)
+    base_embedding_norm = float(np.linalg.norm(base_emb))
+    delta_norm_summary = {
+        "delta_norm_min": float(np.min(delta_norms)) if delta_norms.size else float("nan"),
+        "delta_norm_median": float(np.median(delta_norms)) if delta_norms.size else float("nan"),
+        "delta_norm_mean": float(np.mean(delta_norms)) if delta_norms.size else float("nan"),
+        "delta_norm_p95": float(np.percentile(delta_norms, 95)) if delta_norms.size else float("nan"),
+        "delta_norm_max": float(np.max(delta_norms)) if delta_norms.size else float("nan"),
+    }
+    print(
+        "Embedding sensitivity:",
+        f"base_norm={base_embedding_norm:.4g}",
+        f"delta_norm median/p95={delta_norm_summary['delta_norm_median']:.4g}/"
+        f"{delta_norm_summary['delta_norm_p95']:.4g}",
+    )
+
     contact = delta_to_contact(delta, metric=args.metric, diag=args.diag, apc=not args.no_apc)
     prefix = args.output_prefix + suffix
     os.makedirs(os.path.dirname(os.path.abspath(prefix)), exist_ok=True)
@@ -494,6 +511,9 @@ def run_one(args, sequence: str, model, tokenizer, spec, device: str, source_met
         base_token_length=np.array(base_token_length, dtype=np.int32),
         mutant_token_lengths=mutant_token_lengths,
         mutants_hitting_max_length=np.array(mutants_hitting_max_length, dtype=np.int32),
+        contact_apc_applied=np.array(not args.no_apc, dtype=np.bool_),
+        base_embedding_norm=np.array(base_embedding_norm, dtype=np.float32),
+        delta_norms=delta_norms.astype(np.float32),
     )
     save_contact_csv(f"{prefix}.csv", contact, positions, sequence)
     save_contact_png(f"{prefix}.png", contact, f"{spec.name} bp mutagenesis {args.metric}")
@@ -506,6 +526,9 @@ def run_one(args, sequence: str, model, tokenizer, spec, device: str, source_met
         "pooling": args.pooling,
         "metric": args.metric,
         "diag": args.diag,
+        "contact_apc_applied": not args.no_apc,
+        "base_embedding_norm": base_embedding_norm,
+        **delta_norm_summary,
         "max_length": args.max_length,
         "base_token_length": base_token_length,
         "base_hit_max_length": bool(base_hit_max_length[0]),
