@@ -267,6 +267,11 @@ def enrichment_stats(pair_mask: np.ndarray, top_mask: np.ndarray, finite_mask: n
 
 def summarize_one(path: str, motifs: list[dict], args):
     label, npz_path, contact, positions, sequence = load_npz(path)
+    print(
+        f"[start] {label}: positions={positions.size}, sequence_bp={len(sequence)}, "
+        f"matrix={contact.shape[0]}x{contact.shape[1]}",
+        flush=True,
+    )
     hits = motif_hits(sequence, motifs, include_rc=not args.no_rc)
     motif_to_bit = {motif["name"]: 1 << idx for idx, motif in enumerate(motifs)}
     group_to_bit = {group: 1 << idx for idx, group in enumerate(sorted({motif["group"] for motif in motifs}))}
@@ -301,6 +306,13 @@ def summarize_one(path: str, motifs: list[dict], args):
     motif_pair_stats = enrichment_stats(pair_is_motif, top_mask, finite_mask, bins, args, seed_offset=0)
     same_motif_stats = enrichment_stats(pair_same_motif, top_mask, finite_mask, bins, args, seed_offset=1009)
     top_one_fraction = mean_or_nan(pair_one_motif[top_mask].astype(np.float32))
+    print(
+        f"[done]  {label}: motif_hits={len(hits)}, motif_pos={float(np.mean(motif_mask)):.3f}, "
+        f"top_k={int(np.sum(top_mask))}, motif_enrich={motif_pair_stats['enrichment']:.3g}, "
+        f"z={motif_pair_stats['z']:.3g}, p={motif_pair_stats['empirical_p']:.3g}, "
+        f"same_motif_enrich={same_motif_stats['enrichment']:.3g}",
+        flush=True,
+    )
 
     summary = {
         "label": label,
@@ -573,11 +585,25 @@ def main():
         raise ValueError("--top-fraction must be in (0, 1] when --top-k is not set")
 
     motifs = read_motifs(args.motifs)
+    print("=" * 72, flush=True)
+    print("Contact motif enrichment", flush=True)
+    print(f"  Inputs          : {len(args.inputs)}", flush=True)
+    print(f"  Motifs          : {args.motifs} ({len(motifs)})", flush=True)
+    print(f"  Score           : {args.score}", flush=True)
+    print(f"  Top fraction    : {args.top_fraction}", flush=True)
+    print(f"  Top k override  : {args.top_k}", flush=True)
+    print(f"  Min separation  : {args.min_sep}", flush=True)
+    print(f"  Motif flank     : {args.motif_flank}", flush=True)
+    print(f"  Permutations    : {args.n_perm}", flush=True)
+    print(f"  Per group       : {args.per_motif_group}", flush=True)
+    print(f"  Aggregate by    : {args.aggregate_by or 'none'}", flush=True)
+    print("=" * 72, flush=True)
     summary_rows = []
     hit_rows = []
     top_pair_rows = []
     group_rows = []
-    for raw in args.inputs:
+    for idx, raw in enumerate(args.inputs, start=1):
+        print(f"[{idx}/{len(args.inputs)}] Reading {raw}", flush=True)
         summary, hits, top_pairs, groups = summarize_one(raw, motifs, args)
         summary_rows.append(summary)
         hit_rows.extend(hits)
