@@ -1,0 +1,17 @@
+name,pattern,group
+TATA_box,TATAWAWR,promoter
+Initiator,YYANWYY,promoter
+BREu,SSRCGCC,promoter
+DPE,RGWYV,promoter
+E_box,CACGTG,tfbs
+GC_box,GGGCGG,promoter
+CCAAT_box,CCAAT,promoter
+AP1,TGASTCA,tfbs
+CRE,TGACGTCA,tfbs
+NFkB,GGGRNNYYCC,tfbs
+CTCF_core,CCCTC,insulator
+GATA,WGATAR,tfbs
+ETS,GGAA,tfbs
+RUNX,TGTGGT,tfbs
+YY1,CCATNTT,tfbs
+IRF,GAAA,tfbs
