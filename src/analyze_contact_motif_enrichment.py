@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import re
 from pathlib import Path
@@ -48,12 +49,54 @@ def label_from_path(path: Path) -> str:
 
 def parse_contact_label(label: str):
     variant = re.match(r"^(m\d+)", label)
-    epi = re.search(r"_([01])_(\d+)$", label)
-    return {
+    epi = re.search(r"(?:^|_)gm12878_([01])_(\d+)$", label)
+    hg38 = re.search(r"_(chr[^_]+)_(\d+)_(\d+)$", label)
+    parsed = {
         "model_variant": variant.group(1) if variant else "",
         "epi_label": epi.group(1) if epi else "",
         "sample_index": epi.group(2) if epi else "",
+        "chrom": "",
+        "window_start_1based": "",
+        "window_end_1based": "",
     }
+    if hg38:
+        parsed.update({
+            "chrom": hg38.group(1),
+            "window_start_1based": hg38.group(2),
+            "window_end_1based": hg38.group(3),
+        })
+    return parsed
+
+
+def run_self_test():
+    cases = {
+        "m0_dnagpt_gm12878_0_3": {
+            "model_variant": "m0",
+            "epi_label": "0",
+            "sample_index": "3",
+            "chrom": "",
+        },
+        "m4_r1_bidir_gm12878_1_12": {
+            "model_variant": "m4",
+            "epi_label": "1",
+            "sample_index": "12",
+            "chrom": "",
+        },
+        "m0_dnagpt_chr3_100_4096": {
+            "model_variant": "m0",
+            "epi_label": "",
+            "sample_index": "",
+            "chrom": "chr3",
+            "window_start_1based": "100",
+            "window_end_1based": "4096",
+        },
+    }
+    for label, expected in cases.items():
+        parsed = parse_contact_label(label)
+        for key, value in expected.items():
+            if parsed[key] != value:
+                raise AssertionError(f"{label}: expected {key}={value!r}, got {parsed[key]!r}")
+    print("Self-test passed")
 
 
 def load_npz(path: str):
@@ -123,6 +166,7 @@ def motif_hits(sequence: str, motifs: list[dict], include_rc: bool):
 def build_masks(positions: np.ndarray, hits: list[dict], flank: int):
     covered_bp = np.zeros(int(positions.max()) + 1 if positions.size else 0, dtype=bool)
     motif_by_bp: list[set[str]] = [set() for _ in range(covered_bp.size)]
+    group_by_bp: list[set[str]] = [set() for _ in range(covered_bp.size)]
     for hit in hits:
         lo = max(0, int(hit["start"]) - flank)
         hi = min(covered_bp.size, int(hit["end"]) + flank)
@@ -131,11 +175,13 @@ def build_masks(positions: np.ndarray, hits: list[dict], flank: int):
         covered_bp[lo:hi] = True
         for bp in range(lo, hi):
             motif_by_bp[bp].add(hit["motif"])
+            group_by_bp[bp].add(hit["group"])
     valid = positions < covered_bp.size
     mask = np.zeros(positions.shape[0], dtype=bool)
     mask[valid] = covered_bp[positions[valid]]
     names = [sorted(motif_by_bp[int(pos)]) if int(pos) < len(motif_by_bp) else [] for pos in positions]
-    return mask, names
+    groups = [sorted(group_by_bp[int(pos)]) if int(pos) < len(group_by_bp) else [] for pos in positions]
+    return mask, names, groups
 
 
 def pair_indices(n: int, min_sep: int):
@@ -189,10 +235,37 @@ def permutation_background(pair_is_motif: np.ndarray, top_mask: np.ndarray, bins
     return np.array(bg, dtype=np.float32)
 
 
+def enrichment_stats(pair_mask: np.ndarray, top_mask: np.ndarray, finite_mask: np.ndarray, bins: np.ndarray, args, seed_offset: int = 0):
+    bg = permutation_background(pair_mask, top_mask, bins, args.n_perm, args.seed + seed_offset)
+    top_fraction = mean_or_nan(pair_mask[top_mask].astype(np.float32))
+    all_fraction = mean_or_nan(pair_mask[finite_mask].astype(np.float32))
+    bg_mean = float(np.mean(bg)) if bg.size else float("nan")
+    bg_std = float(np.std(bg)) if bg.size else float("nan")
+    z = float((top_fraction - bg_mean) / bg_std) if bg_std > 1e-12 else float("nan")
+    p_emp = float((np.sum(bg >= top_fraction) + 1) / (bg.size + 1)) if bg.size else float("nan")
+    enrichment = float(top_fraction / bg_mean) if bg_mean > 1e-12 else float("nan")
+    return {
+        "top_fraction": top_fraction,
+        "all_fraction": all_fraction,
+        "background_mean": bg_mean,
+        "background_std": bg_std,
+        "enrichment": enrichment,
+        "z": z,
+        "empirical_p": p_emp,
+    }
+
+
+def pair_shares_name(names_a: list[list[str]], names_b: list[list[str]], indices_a: np.ndarray, indices_b: np.ndarray):
+    out = np.zeros(indices_a.shape[0], dtype=bool)
+    for idx, (a, b) in enumerate(zip(indices_a, indices_b)):
+        out[idx] = bool(set(names_a[int(a)]).intersection(names_b[int(b)]))
+    return out
+
+
 def summarize_one(path: str, motifs: list[dict], args):
     label, npz_path, contact, positions, sequence = load_npz(path)
     hits = motif_hits(sequence, motifs, include_rc=not args.no_rc)
-    motif_mask, motif_names_by_pos = build_masks(positions, hits, args.motif_flank)
+    motif_mask, motif_names_by_pos, motif_groups_by_pos = build_masks(positions, hits, args.motif_flank)
 
     x = contact.copy()
     if args.score == "abs":
@@ -207,19 +280,14 @@ def summarize_one(path: str, motifs: list[dict], args):
     i, j = pair_indices(x.shape[0], args.min_sep)
     values = x[i, j]
     top_mask = top_pair_mask(values, args.top_fraction, args.top_k)
+    finite_mask = np.isfinite(values)
     pair_is_motif = motif_mask[i] & motif_mask[j]
     pair_one_motif = motif_mask[i] | motif_mask[j]
+    pair_same_motif = pair_shares_name(motif_names_by_pos, motif_names_by_pos, i, j)
     bins = distance_bins(j - i, args.distance_bins)
-    bg = permutation_background(pair_is_motif, top_mask, bins, args.n_perm, args.seed)
-
-    top_fraction = mean_or_nan(pair_is_motif[top_mask].astype(np.float32))
+    motif_pair_stats = enrichment_stats(pair_is_motif, top_mask, finite_mask, bins, args, seed_offset=0)
+    same_motif_stats = enrichment_stats(pair_same_motif, top_mask, finite_mask, bins, args, seed_offset=1009)
     top_one_fraction = mean_or_nan(pair_one_motif[top_mask].astype(np.float32))
-    all_fraction = mean_or_nan(pair_is_motif[np.isfinite(values)].astype(np.float32))
-    bg_mean = float(np.mean(bg)) if bg.size else float("nan")
-    bg_std = float(np.std(bg)) if bg.size else float("nan")
-    z = float((top_fraction - bg_mean) / bg_std) if bg_std > 1e-12 else float("nan")
-    p_emp = float((np.sum(bg >= top_fraction) + 1) / (bg.size + 1)) if bg.size else float("nan")
-    enrichment = float(top_fraction / bg_mean) if bg_mean > 1e-12 else float("nan")
 
     summary = {
         "label": label,
@@ -235,15 +303,53 @@ def summarize_one(path: str, motifs: list[dict], args):
         "top_k": int(np.sum(top_mask)),
         "min_sep": args.min_sep,
         "motif_flank": args.motif_flank,
-        "top_motif_pair_fraction": top_fraction,
+        "top_motif_pair_fraction": motif_pair_stats["top_fraction"],
         "top_one_endpoint_motif_fraction": top_one_fraction,
-        "all_motif_pair_fraction": all_fraction,
-        "distance_matched_background_mean": bg_mean,
-        "distance_matched_background_std": bg_std,
-        "motif_pair_enrichment": enrichment,
-        "motif_pair_z": z,
-        "motif_pair_empirical_p": p_emp,
+        "all_motif_pair_fraction": motif_pair_stats["all_fraction"],
+        "distance_matched_background_mean": motif_pair_stats["background_mean"],
+        "distance_matched_background_std": motif_pair_stats["background_std"],
+        "motif_pair_enrichment": motif_pair_stats["enrichment"],
+        "motif_pair_z": motif_pair_stats["z"],
+        "motif_pair_empirical_p": motif_pair_stats["empirical_p"],
+        "top_same_motif_pair_fraction": same_motif_stats["top_fraction"],
+        "all_same_motif_pair_fraction": same_motif_stats["all_fraction"],
+        "same_motif_background_mean": same_motif_stats["background_mean"],
+        "same_motif_pair_enrichment": same_motif_stats["enrichment"],
+        "same_motif_pair_z": same_motif_stats["z"],
+        "same_motif_pair_empirical_p": same_motif_stats["empirical_p"],
     }
+
+    group_rows = []
+    if args.per_motif_group:
+        groups = sorted({motif["group"] for motif in motifs})
+        for group_idx, group in enumerate(groups):
+            group_mask = np.array([group in item for item in motif_groups_by_pos], dtype=bool)
+            pair_is_group = group_mask[i] & group_mask[j]
+            group_same_motif = pair_same_motif & pair_is_group
+            group_pair_stats = enrichment_stats(
+                pair_is_group, top_mask, finite_mask, bins, args, seed_offset=2000 + group_idx
+            )
+            group_same_stats = enrichment_stats(
+                group_same_motif, top_mask, finite_mask, bins, args, seed_offset=3000 + group_idx
+            )
+            group_rows.append({
+                "label": label,
+                **parse_contact_label(label),
+                "group": group,
+                "group_position_fraction": float(np.mean(group_mask)) if group_mask.size else float("nan"),
+                "top_group_pair_fraction": group_pair_stats["top_fraction"],
+                "all_group_pair_fraction": group_pair_stats["all_fraction"],
+                "group_background_mean": group_pair_stats["background_mean"],
+                "group_pair_enrichment": group_pair_stats["enrichment"],
+                "group_pair_z": group_pair_stats["z"],
+                "group_pair_empirical_p": group_pair_stats["empirical_p"],
+                "top_group_same_motif_fraction": group_same_stats["top_fraction"],
+                "all_group_same_motif_fraction": group_same_stats["all_fraction"],
+                "group_same_motif_background_mean": group_same_stats["background_mean"],
+                "group_same_motif_enrichment": group_same_stats["enrichment"],
+                "group_same_motif_z": group_same_stats["z"],
+                "group_same_motif_empirical_p": group_same_stats["empirical_p"],
+            })
 
     hit_rows = []
     for hit in hits:
@@ -266,9 +372,12 @@ def summarize_one(path: str, motifs: list[dict], args):
             "score": float(values[pair_idx]),
             "i_motifs": ";".join(motif_names_by_pos[a]),
             "j_motifs": ";".join(motif_names_by_pos[b]),
+            "i_groups": ";".join(motif_groups_by_pos[a]),
+            "j_groups": ";".join(motif_groups_by_pos[b]),
             "motif_pair": bool(pair_is_motif[pair_idx]),
+            "same_motif_pair": bool(pair_same_motif[pair_idx]),
         })
-    return summary, hit_rows, top_rows
+    return summary, hit_rows, top_rows, group_rows
 
 
 def write_csv(path: str, rows: list[dict], fieldnames: list[str] | None = None):
@@ -281,22 +390,121 @@ def write_csv(path: str, rows: list[dict], fieldnames: list[str] | None = None):
         writer.writerows(rows)
 
 
+def normal_sf(z: float):
+    return 0.5 * math.erfc(z / math.sqrt(2.0))
+
+
+def combine_stouffer(z_values: list[float]):
+    vals = [z for z in z_values if np.isfinite(z)]
+    if not vals:
+        return float("nan"), float("nan")
+    z = float(np.sum(vals) / math.sqrt(len(vals)))
+    return z, normal_sf(z)
+
+
+def combine_fisher(p_values: list[float]):
+    vals = [p for p in p_values if np.isfinite(p) and p > 0]
+    if not vals:
+        return float("nan"), float("nan")
+    stat = float(-2.0 * np.sum(np.log(vals)))
+    try:
+        from scipy.stats import chi2
+
+        p = float(chi2.sf(stat, 2 * len(vals)))
+    except Exception:
+        p = float("nan")
+    return stat, p
+
+
+def aggregate_rows(rows: list[dict], keys: list[str]):
+    groups: dict[tuple, list[dict]] = {}
+    for row in rows:
+        key = tuple(row.get(item, "") for item in keys)
+        groups.setdefault(key, []).append(row)
+
+    out = []
+    numeric_fields = [
+        "motif_position_fraction",
+        "top_motif_pair_fraction",
+        "top_one_endpoint_motif_fraction",
+        "all_motif_pair_fraction",
+        "distance_matched_background_mean",
+        "motif_pair_enrichment",
+        "motif_pair_z",
+        "motif_pair_empirical_p",
+        "top_same_motif_pair_fraction",
+        "all_same_motif_pair_fraction",
+        "same_motif_background_mean",
+        "same_motif_pair_enrichment",
+        "same_motif_pair_z",
+        "same_motif_pair_empirical_p",
+    ]
+    for key, group in sorted(groups.items()):
+        item = {name: value for name, value in zip(keys, key)}
+        item["n"] = len(group)
+        for field in numeric_fields:
+            vals = [float(row[field]) for row in group if row.get(field, "") not in ("", None)]
+            vals = [val for val in vals if np.isfinite(val)]
+            item[f"mean_{field}"] = float(np.mean(vals)) if vals else float("nan")
+            item[f"median_{field}"] = float(np.median(vals)) if vals else float("nan")
+        stouffer_z, stouffer_p = combine_stouffer([float(row["motif_pair_z"]) for row in group])
+        fisher_stat, fisher_p = combine_fisher([float(row["motif_pair_empirical_p"]) for row in group])
+        item["stouffer_z"] = stouffer_z
+        item["stouffer_p_one_sided"] = stouffer_p
+        item["fisher_chi2"] = fisher_stat
+        item["fisher_p"] = fisher_p
+        out.append(item)
+    return out
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--inputs", nargs="+", required=True, help="Input contact-map .npz files")
+    p.add_argument("--inputs", nargs="+", default=None, help="Input contact-map .npz files")
     p.add_argument("--motifs", default="data/motif_panels/core_regulatory_iupac.csv")
     p.add_argument("--output-prefix", required=True)
-    p.add_argument("--score", choices=("abs", "positive", "negative_abs"), default="abs")
+    p.add_argument(
+        "--score",
+        choices=("abs", "positive", "negative_abs"),
+        default="positive",
+        help=(
+            "Contact score used to define top pairs. 'positive' is the default for motif co-occurrence, "
+            "where same-direction perturbation effects are the primary signal. Use 'abs' as a sensitivity check."
+        ),
+    )
     p.add_argument("--top-fraction", type=float, default=0.01)
     p.add_argument("--top-k", type=int, default=None)
     p.add_argument("--min-sep", type=int, default=50, help="Minimum matrix-index separation for evaluated pairs")
-    p.add_argument("--motif-flank", type=int, default=0, help="Expand motif hits by this many bp on both sides")
+    p.add_argument(
+        "--motif-flank",
+        type=int,
+        default=2,
+        help="Expand motif hits by this many bp on both sides to tolerate token/motif boundary offsets",
+    )
     p.add_argument("--distance-bins", type=int, nargs="+", default=[50, 100, 200, 500, 1000, 2000, 4000])
-    p.add_argument("--n-perm", type=int, default=200)
+    p.add_argument(
+        "--n-perm",
+        type=int,
+        default=200,
+        help="Distance-matched permutations. Use >=1000 for paper-level p-values.",
+    )
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--no-rc", action="store_true", help="Do not scan reverse-complement motif orientation")
     p.add_argument("--write-top-pairs", type=int, default=200)
+    p.add_argument("--per-motif-group", action="store_true", help="Write motif-group-specific enrichment results")
+    p.add_argument(
+        "--aggregate-by",
+        nargs="+",
+        default=[],
+        choices=("model_variant", "epi_label", "sample_index", "chrom"),
+        help="Optional columns used to write an aggregate summary CSV, e.g. --aggregate-by model_variant",
+    )
+    p.add_argument("--self-test", action="store_true")
     args = p.parse_args()
+    if args.self_test:
+        run_self_test()
+        return
+    if not args.inputs:
+        raise ValueError("--inputs is required unless --self-test is used")
     if args.top_k is None and not (0 < args.top_fraction <= 1):
         raise ValueError("--top-fraction must be in (0, 1] when --top-k is not set")
 
@@ -304,11 +512,13 @@ def main():
     summary_rows = []
     hit_rows = []
     top_pair_rows = []
+    group_rows = []
     for raw in args.inputs:
-        summary, hits, top_pairs = summarize_one(raw, motifs, args)
+        summary, hits, top_pairs, groups = summarize_one(raw, motifs, args)
         summary_rows.append(summary)
         hit_rows.extend(hits)
         top_pair_rows.extend(top_pairs)
+        group_rows.extend(groups)
 
     write_csv(f"{args.output_prefix}_summary.csv", summary_rows)
     write_csv(
@@ -319,11 +529,36 @@ def main():
     write_csv(
         f"{args.output_prefix}_top_pairs.csv",
         top_pair_rows,
-        ["label", "rank", "i", "j", "i_bp", "j_bp", "distance", "score", "i_motifs", "j_motifs", "motif_pair"],
+        [
+            "label",
+            "rank",
+            "i",
+            "j",
+            "i_bp",
+            "j_bp",
+            "distance",
+            "score",
+            "i_motifs",
+            "j_motifs",
+            "i_groups",
+            "j_groups",
+            "motif_pair",
+            "same_motif_pair",
+        ],
     )
+    if args.per_motif_group:
+        write_csv(f"{args.output_prefix}_motif_group_summary.csv", group_rows)
+    if args.aggregate_by:
+        aggregate = aggregate_rows(summary_rows, args.aggregate_by)
+        aggregate_suffix = "_".join(args.aggregate_by)
+        write_csv(f"{args.output_prefix}_aggregate_{aggregate_suffix}.csv", aggregate)
     print(f"Wrote {args.output_prefix}_summary.csv")
     print(f"Wrote {args.output_prefix}_motif_hits.csv")
     print(f"Wrote {args.output_prefix}_top_pairs.csv")
+    if args.per_motif_group:
+        print(f"Wrote {args.output_prefix}_motif_group_summary.csv")
+    if args.aggregate_by:
+        print(f"Wrote {args.output_prefix}_aggregate_{aggregate_suffix}.csv")
 
 
 if __name__ == "__main__":

@@ -31,10 +31,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import os
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -368,7 +370,7 @@ def parse_args():
     )
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--sequence")
-    src.add_argument("--fasta")
+    src.add_argument("--fasta", nargs="+")
     src.add_argument("--epi-csv", help="CSV with enhancer,promoter,label columns")
     p.add_argument("--epi-label", type=int, choices=(0, 1), default=None)
     p.add_argument("--epi-index", type=int, default=0, help="0-based row index after optional label filtering")
@@ -393,6 +395,15 @@ def parse_args():
         help="Also run reverse complement and save a flipped contact map/correlation.",
     )
     return p.parse_args()
+
+
+def output_prefix_for_fasta(base_prefix: str, fasta_path: str, model_name: str, multi_fasta: bool):
+    if not multi_fasta:
+        return base_prefix
+    stem = Path(fasta_path).stem
+    if base_prefix.endswith(("/", os.sep)) or (os.path.isdir(base_prefix) and not os.path.splitext(base_prefix)[1]):
+        return os.path.join(base_prefix, f"{model_name}_{stem}_cj")
+    return f"{base_prefix}_{stem}"
 
 
 def run_one(args, sequence: str, model, tokenizer, spec, device: str, source_meta: dict | None = None, suffix: str = ""):
@@ -569,8 +580,8 @@ def main():
     if args.sequence is not None:
         sequence = args.sequence.strip()
     elif args.fasta is not None:
-        sequence = _read_fasta(args.fasta).strip()
-        source_meta = {"source": args.fasta, "source_type": "fasta"}
+        sequence = _read_fasta(args.fasta[0]).strip()
+        source_meta = {"source": args.fasta[0], "source_type": "fasta"}
     else:
         sequence, source_meta = _read_epi_csv(
             args.epi_csv,
@@ -591,6 +602,28 @@ def main():
     spec = step4.ModelSpec.parse(args.model)
     model, tokenizer = _load_wrapper(args.loader)(spec, device, dtype)
     ensure_padding(tokenizer)
+
+    if args.fasta is not None and len(args.fasta) > 1:
+        if args.rc_consistency:
+            raise ValueError("--rc-consistency is only supported for a single input sequence/fasta")
+        original_output_prefix = args.output_prefix
+        for idx, fasta_path in enumerate(args.fasta, start=1):
+            print("=" * 72)
+            print(f"[{idx}/{len(args.fasta)}] FASTA: {fasta_path}")
+            args.output_prefix = output_prefix_for_fasta(
+                original_output_prefix,
+                fasta_path,
+                spec.name,
+                multi_fasta=True,
+            )
+            sequence = _read_fasta(fasta_path).strip()
+            source_meta = {"source": fasta_path, "source_type": "fasta"}
+            run_one(args, sequence, model, tokenizer, spec, device, source_meta=source_meta)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+        args.output_prefix = original_output_prefix
+        return
 
     contact, positions = run_one(args, sequence, model, tokenizer, spec, device, source_meta=source_meta)
 
