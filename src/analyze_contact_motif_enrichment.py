@@ -48,9 +48,9 @@ def label_from_path(path: Path) -> str:
 
 
 def parse_contact_label(label: str):
-    variant = re.match(r"^(m\d+)", label)
-    epi = re.search(r"(?:^|_)gm12878_([01])_(\d+)$", label)
-    hg38 = re.search(r"_(chr[^_]+)_(\d+)_(\d+)$", label)
+    variant = re.match(r"^(m\d+)", label, flags=re.IGNORECASE)
+    epi = re.search(r"(?:^|_)gm12878_([01])_(\d+)$", label, flags=re.IGNORECASE)
+    hg38 = re.search(r"_(chr[^_]+)_(\d+)_(\d+)$", label, flags=re.IGNORECASE)
     parsed = {
         "model_variant": variant.group(1) if variant else "",
         "epi_label": epi.group(1) if epi else "",
@@ -163,16 +163,22 @@ def motif_hits(sequence: str, motifs: list[dict], include_rc: bool):
     return hits
 
 
-def build_masks(positions: np.ndarray, hits: list[dict], flank: int):
+def build_masks(positions: np.ndarray, hits: list[dict], flank: int, motif_to_bit: dict[str, int], group_to_bit: dict[str, int]):
     covered_bp = np.zeros(int(positions.max()) + 1 if positions.size else 0, dtype=bool)
     motif_by_bp: list[set[str]] = [set() for _ in range(covered_bp.size)]
     group_by_bp: list[set[str]] = [set() for _ in range(covered_bp.size)]
+    motif_bits_by_bp = np.zeros(covered_bp.size, dtype=np.uint64)
+    group_bits_by_bp = np.zeros(covered_bp.size, dtype=np.uint64)
     for hit in hits:
         lo = max(0, int(hit["start"]) - flank)
         hi = min(covered_bp.size, int(hit["end"]) + flank)
         if lo >= hi:
             continue
         covered_bp[lo:hi] = True
+        motif_bit = np.uint64(motif_to_bit[hit["motif"]])
+        group_bit = np.uint64(group_to_bit[hit["group"]])
+        motif_bits_by_bp[lo:hi] |= motif_bit
+        group_bits_by_bp[lo:hi] |= group_bit
         for bp in range(lo, hi):
             motif_by_bp[bp].add(hit["motif"])
             group_by_bp[bp].add(hit["group"])
@@ -181,7 +187,11 @@ def build_masks(positions: np.ndarray, hits: list[dict], flank: int):
     mask[valid] = covered_bp[positions[valid]]
     names = [sorted(motif_by_bp[int(pos)]) if int(pos) < len(motif_by_bp) else [] for pos in positions]
     groups = [sorted(group_by_bp[int(pos)]) if int(pos) < len(group_by_bp) else [] for pos in positions]
-    return mask, names, groups
+    motif_bits = np.zeros(positions.shape[0], dtype=np.uint64)
+    group_bits = np.zeros(positions.shape[0], dtype=np.uint64)
+    motif_bits[valid] = motif_bits_by_bp[positions[valid]]
+    group_bits[valid] = group_bits_by_bp[positions[valid]]
+    return mask, names, groups, motif_bits, group_bits
 
 
 def pair_indices(n: int, min_sep: int):
@@ -255,17 +265,20 @@ def enrichment_stats(pair_mask: np.ndarray, top_mask: np.ndarray, finite_mask: n
     }
 
 
-def pair_shares_name(names_a: list[list[str]], names_b: list[list[str]], indices_a: np.ndarray, indices_b: np.ndarray):
-    out = np.zeros(indices_a.shape[0], dtype=bool)
-    for idx, (a, b) in enumerate(zip(indices_a, indices_b)):
-        out[idx] = bool(set(names_a[int(a)]).intersection(names_b[int(b)]))
-    return out
-
-
 def summarize_one(path: str, motifs: list[dict], args):
     label, npz_path, contact, positions, sequence = load_npz(path)
     hits = motif_hits(sequence, motifs, include_rc=not args.no_rc)
-    motif_mask, motif_names_by_pos, motif_groups_by_pos = build_masks(positions, hits, args.motif_flank)
+    motif_to_bit = {motif["name"]: 1 << idx for idx, motif in enumerate(motifs)}
+    group_to_bit = {group: 1 << idx for idx, group in enumerate(sorted({motif["group"] for motif in motifs}))}
+    if len(motif_to_bit) > 63 or len(group_to_bit) > 63:
+        raise ValueError("Bitset motif/group matching supports at most 63 motifs and 63 groups")
+    (
+        motif_mask,
+        motif_names_by_pos,
+        motif_groups_by_pos,
+        motif_bits_by_pos,
+        group_bits_by_pos,
+    ) = build_masks(positions, hits, args.motif_flank, motif_to_bit, group_to_bit)
 
     x = contact.copy()
     if args.score == "abs":
@@ -283,7 +296,7 @@ def summarize_one(path: str, motifs: list[dict], args):
     finite_mask = np.isfinite(values)
     pair_is_motif = motif_mask[i] & motif_mask[j]
     pair_one_motif = motif_mask[i] | motif_mask[j]
-    pair_same_motif = pair_shares_name(motif_names_by_pos, motif_names_by_pos, i, j)
+    pair_same_motif = (motif_bits_by_pos[i] & motif_bits_by_pos[j]) != 0
     bins = distance_bins(j - i, args.distance_bins)
     motif_pair_stats = enrichment_stats(pair_is_motif, top_mask, finite_mask, bins, args, seed_offset=0)
     same_motif_stats = enrichment_stats(pair_same_motif, top_mask, finite_mask, bins, args, seed_offset=1009)
@@ -323,7 +336,8 @@ def summarize_one(path: str, motifs: list[dict], args):
     if args.per_motif_group:
         groups = sorted({motif["group"] for motif in motifs})
         for group_idx, group in enumerate(groups):
-            group_mask = np.array([group in item for item in motif_groups_by_pos], dtype=bool)
+            group_bit = np.uint64(group_to_bit[group])
+            group_mask = (group_bits_by_pos & group_bit) != 0
             pair_is_group = group_mask[i] & group_mask[j]
             group_same_motif = pair_same_motif & pair_is_group
             group_pair_stats = enrichment_stats(
@@ -451,8 +465,55 @@ def aggregate_rows(rows: list[dict], keys: list[str]):
         fisher_stat, fisher_p = combine_fisher([float(row["motif_pair_empirical_p"]) for row in group])
         item["stouffer_z"] = stouffer_z
         item["stouffer_p_one_sided"] = stouffer_p
-        item["fisher_chi2"] = fisher_stat
-        item["fisher_p"] = fisher_p
+        item["fisher_empirical_p_chi2"] = fisher_stat
+        item["fisher_empirical_p"] = fisher_p
+        out.append(item)
+    return out
+
+
+def aggregate_group_rows(rows: list[dict], keys: list[str]):
+    group_keys = keys + ["group"]
+    groups: dict[tuple, list[dict]] = {}
+    for row in rows:
+        key = tuple(row.get(item, "") for item in group_keys)
+        groups.setdefault(key, []).append(row)
+
+    out = []
+    numeric_fields = [
+        "group_position_fraction",
+        "top_group_pair_fraction",
+        "all_group_pair_fraction",
+        "group_background_mean",
+        "group_pair_enrichment",
+        "group_pair_z",
+        "group_pair_empirical_p",
+        "top_group_same_motif_fraction",
+        "all_group_same_motif_fraction",
+        "group_same_motif_background_mean",
+        "group_same_motif_enrichment",
+        "group_same_motif_z",
+        "group_same_motif_empirical_p",
+    ]
+    for key, group in sorted(groups.items()):
+        item = {name: value for name, value in zip(group_keys, key)}
+        item["n"] = len(group)
+        for field in numeric_fields:
+            vals = [float(row[field]) for row in group if row.get(field, "") not in ("", None)]
+            vals = [val for val in vals if np.isfinite(val)]
+            item[f"mean_{field}"] = float(np.mean(vals)) if vals else float("nan")
+            item[f"median_{field}"] = float(np.median(vals)) if vals else float("nan")
+        stouffer_z, stouffer_p = combine_stouffer([float(row["group_pair_z"]) for row in group])
+        fisher_stat, fisher_p = combine_fisher([float(row["group_pair_empirical_p"]) for row in group])
+        same_stouffer_z, same_stouffer_p = combine_stouffer([float(row["group_same_motif_z"]) for row in group])
+        same_fisher_stat, same_fisher_p = combine_fisher([float(row["group_same_motif_empirical_p"]) for row in group])
+        item["group_stouffer_z"] = stouffer_z
+        item["group_stouffer_p_one_sided"] = stouffer_p
+        item["group_fisher_empirical_p_chi2"] = fisher_stat
+        item["group_fisher_empirical_p"] = fisher_p
+        item["group_same_motif_stouffer_z"] = same_stouffer_z
+        item["group_same_motif_stouffer_p_one_sided"] = same_stouffer_p
+        item["group_same_motif_fisher_empirical_p_chi2"] = same_fisher_stat
+        item["group_same_motif_fisher_empirical_p"] = same_fisher_p
         out.append(item)
     return out
 
@@ -485,7 +546,10 @@ def main():
         "--n-perm",
         type=int,
         default=200,
-        help="Distance-matched permutations. Use >=1000 for paper-level p-values.",
+        help=(
+            "Distance-matched permutations. Use >=1000 for paper-level per-window p-values; "
+            "use >=5000 if interpreting Fisher-combined empirical p-values."
+        ),
     )
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--no-rc", action="store_true", help="Do not scan reverse-complement motif orientation")
@@ -552,6 +616,9 @@ def main():
         aggregate = aggregate_rows(summary_rows, args.aggregate_by)
         aggregate_suffix = "_".join(args.aggregate_by)
         write_csv(f"{args.output_prefix}_aggregate_{aggregate_suffix}.csv", aggregate)
+        if group_rows:
+            group_aggregate = aggregate_group_rows(group_rows, args.aggregate_by)
+            write_csv(f"{args.output_prefix}_aggregate_groups_{aggregate_suffix}.csv", group_aggregate)
     print(f"Wrote {args.output_prefix}_summary.csv")
     print(f"Wrote {args.output_prefix}_motif_hits.csv")
     print(f"Wrote {args.output_prefix}_top_pairs.csv")
@@ -559,6 +626,8 @@ def main():
         print(f"Wrote {args.output_prefix}_motif_group_summary.csv")
     if args.aggregate_by:
         print(f"Wrote {args.output_prefix}_aggregate_{aggregate_suffix}.csv")
+        if group_rows:
+            print(f"Wrote {args.output_prefix}_aggregate_groups_{aggregate_suffix}.csv")
 
 
 if __name__ == "__main__":

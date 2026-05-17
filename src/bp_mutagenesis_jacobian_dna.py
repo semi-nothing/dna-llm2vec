@@ -54,12 +54,18 @@ COMPLEMENT = str.maketrans("ACGTacgt", "TGCAtgca")
 
 def _read_fasta(path: str) -> str:
     parts: list[str] = []
+    n_records = 0
     with open(path, "r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
-            if not line or line.startswith(">"):
+            if not line:
+                continue
+            if line.startswith(">"):
+                n_records += 1
                 continue
             parts.append(line)
+    if n_records > 1:
+        print(f"WARNING: {path} contains {n_records} FASTA records; concatenating them.")
     return "".join(parts)
 
 
@@ -402,7 +408,7 @@ def output_prefix_for_fasta(base_prefix: str, fasta_path: str, model_name: str, 
         return base_prefix
     stem = Path(fasta_path).stem
     if base_prefix.endswith(("/", os.sep)) or (os.path.isdir(base_prefix) and not os.path.splitext(base_prefix)[1]):
-        return os.path.join(base_prefix, f"{model_name}_{stem}_cj")
+        return os.path.join(base_prefix, f"{model_name}_{stem}")
     return f"{base_prefix}_{stem}"
 
 
