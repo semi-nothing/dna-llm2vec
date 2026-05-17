@@ -140,6 +140,75 @@ def write_csv(path: str, rows: list[dict], fieldnames: list[str]):
         writer.writerows(rows)
 
 
+def corr_matrix_from_rows(labels: list[str], corr_rows: list[dict]):
+    index = {label: i for i, label in enumerate(labels)}
+    matrix = np.full((len(labels), len(labels)), np.nan, dtype=np.float32)
+    for row in corr_rows:
+        i = index[row["model_a"]]
+        j = index[row["model_b"]]
+        matrix[i, j] = row["spearman"]
+    np.fill_diagonal(matrix, 1.0)
+    return matrix
+
+
+def cluster_order_from_corr(corr: np.ndarray):
+    if corr.shape[0] < 2:
+        return list(range(corr.shape[0])), None
+    try:
+        from scipy.cluster.hierarchy import linkage, leaves_list
+        from scipy.spatial.distance import squareform
+
+        clean = np.nan_to_num(corr, nan=0.0, posinf=1.0, neginf=-1.0)
+        clean = np.clip((clean + clean.T) / 2.0, -1.0, 1.0)
+        dist = 1.0 - clean
+        np.fill_diagonal(dist, 0.0)
+        linkage_matrix = linkage(squareform(dist, checks=False), method="average")
+        return leaves_list(linkage_matrix).astype(int).tolist(), linkage_matrix
+    except Exception as exc:
+        print(f"WARNING: clustering unavailable ({exc}); using input order")
+        return list(range(corr.shape[0])), None
+
+
+def plot_spearman_heatmap(path: str, labels: list[str], corr: np.ndarray, title: str):
+    import matplotlib.pyplot as plt
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    n = len(labels)
+    fig_size = max(4.0, 0.55 * n + 2.0)
+    fig, ax = plt.subplots(figsize=(fig_size, fig_size), constrained_layout=True)
+    im = ax.imshow(corr, cmap="coolwarm", vmin=-1.0, vmax=1.0)
+    ax.set_title(title)
+    ax.set_xticks(np.arange(n))
+    ax.set_yticks(np.arange(n))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticklabels(labels)
+    for i in range(n):
+        for j in range(n):
+            val = corr[i, j]
+            if np.isfinite(val):
+                ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=7)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Spearman rho")
+    fig.savefig(path, dpi=250)
+    plt.close(fig)
+
+
+def plot_dendrogram(path: str, labels: list[str], linkage_matrix):
+    if linkage_matrix is None:
+        return False
+    import matplotlib.pyplot as plt
+    from scipy.cluster.hierarchy import dendrogram
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    width = max(5.0, 0.55 * len(labels) + 2.0)
+    fig, ax = plt.subplots(figsize=(width, 4.0), constrained_layout=True)
+    dendrogram(linkage_matrix, labels=labels, leaf_rotation=45, ax=ax)
+    ax.set_ylabel("1 - Spearman rho")
+    ax.set_title("Contact-map similarity clustering")
+    fig.savefig(path, dpi=250)
+    plt.close(fig)
+    return True
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--inputs", nargs="+", required=True)
@@ -219,8 +288,41 @@ def main():
         ["model_a", "model_b", "spearman", "n_aligned_positions", "alignment_mode"],
     )
 
+    labels = [item[0] for item in items]
+    corr = corr_matrix_from_rows(labels, corr_rows)
+    order, linkage_matrix = cluster_order_from_corr(corr)
+    ordered_labels = [labels[i] for i in order]
+    ordered_corr = corr[np.ix_(order, order)]
+    write_csv(
+        f"{args.output_prefix}_cluster_order.csv",
+        [{"rank": rank + 1, "label": label} for rank, label in enumerate(ordered_labels)],
+        ["rank", "label"],
+    )
+    plot_spearman_heatmap(
+        f"{args.output_prefix}_spearman_heatmap.png",
+        labels,
+        corr,
+        "Contact-map Spearman similarity",
+    )
+    plot_spearman_heatmap(
+        f"{args.output_prefix}_spearman_clustered_heatmap.png",
+        ordered_labels,
+        ordered_corr,
+        "Clustered contact-map Spearman similarity",
+    )
+    wrote_dendrogram = plot_dendrogram(
+        f"{args.output_prefix}_spearman_dendrogram.png",
+        labels,
+        linkage_matrix,
+    )
+
     print(f"Wrote {args.output_prefix}_metrics.csv")
     print(f"Wrote {args.output_prefix}_spearman.csv")
+    print(f"Wrote {args.output_prefix}_cluster_order.csv")
+    print(f"Wrote {args.output_prefix}_spearman_heatmap.png")
+    print(f"Wrote {args.output_prefix}_spearman_clustered_heatmap.png")
+    if wrote_dendrogram:
+        print(f"Wrote {args.output_prefix}_spearman_dendrogram.png")
 
 
 if __name__ == "__main__":
