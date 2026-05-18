@@ -237,9 +237,14 @@ def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[d
     colors = [MODEL_COLORS[m] for m in variants]
     axes[1].bar(x2, deltas, color=colors, alpha=0.9)
     axes[1].axhline(0.0, color="#111827", linewidth=1.0, linestyle="--")
+    delta_min = min(deltas + [0.0])
+    delta_max = max(deltas + [0.0])
+    delta_pad = max(1.0, 0.12 * (delta_max - delta_min))
+    axes[1].set_ylim(delta_min - delta_pad, delta_max + delta_pad)
+    label_step = 0.04 * (delta_max - delta_min)
     for idx, delta in enumerate(deltas):
         va = "bottom" if delta >= 0 else "top"
-        offset = 0.8 if delta >= 0 else -0.8
+        offset = label_step if delta >= 0 else -label_step
         axes[1].text(idx, delta + offset, f"{delta:+.1f}", ha="center", va=va, fontsize=9)
     axes[1].set_xticks(x2, [MODEL_LABELS[m] for m in variants])
     setup_axes(axes[1], "B. Contrastive variants vs M2", "Delta Stouffer z")
@@ -247,13 +252,20 @@ def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[d
     group_by_key = {(row["model_variant"].lower(), row["group"]): row for row in group_rows}
     group_models = ["m2", "m3", "m4", "m5", "m6"]
     x3 = np.arange(len(group_models))
+    group_values = []
     for group, color in (("promoter", "#2563eb"), ("tfbs", "#dc2626")):
         if not all((model, group) in group_by_key for model in group_models):
             continue
         y = [f(group_by_key[(model, group)], "group_stouffer_z") for model in group_models]
+        group_values.extend(y)
         axes[2].plot(x3, y, marker="o", linewidth=2.3, label=group.upper(), color=color)
         peak = int(np.nanargmax(y))
         axes[2].text(peak, y[peak] + max(y) * 0.05, f"{y[peak]:.1f}", ha="center", fontsize=9, color=color)
+    if group_values:
+        group_min = min(group_values + [0.0])
+        group_max = max(group_values + [0.0])
+        group_pad = max(1.0, 0.12 * (group_max - group_min))
+        axes[2].set_ylim(group_min - group_pad, group_max + group_pad)
     axes[2].axhline(0.0, color="#111827", linewidth=1.0, linestyle="--")
     axes[2].set_xticks(x3, [MODEL_LABELS[m] for m in group_models])
     setup_axes(axes[2], "C. Group-specific contrastive signal", "Group Stouffer z")
