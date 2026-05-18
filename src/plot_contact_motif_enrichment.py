@@ -74,7 +74,7 @@ def model_names(rows: list[dict[str, str]]) -> list[str]:
 
 
 def setup_axes(ax, title: str, ylabel: str):
-    ax.set_title(title, fontsize=11, weight="bold")
+    ax.set_title(title, fontsize=10, weight="bold")
     ax.set_ylabel(ylabel)
     ax.grid(axis="y", color="#e5e7eb", linewidth=0.8)
     ax.spines["top"].set_visible(False)
@@ -205,7 +205,13 @@ def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[d
     if not required.issubset(rows_by_model):
         return
 
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.2), constrained_layout=True)
+    fig = plt.figure(figsize=(10.5, 7.2), constrained_layout=True)
+    spec = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.05])
+    axes = [
+        fig.add_subplot(spec[0, 0]),
+        fig.add_subplot(spec[0, 1]),
+        fig.add_subplot(spec[1, :]),
+    ]
 
     chain = ["m0", "m1", "m2"]
     chain_z = [f(rows_by_model[m], "stouffer_z") for m in chain]
@@ -227,6 +233,7 @@ def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[d
             fontsize=9,
         )
     axes[0].set_xticks(x, [MODEL_LABELS[m] for m in chain])
+    axes[0].tick_params(axis="x", labelsize=9)
     axes[0].set_ylim(0, max(chain_z) * 1.22)
     setup_axes(axes[0], "A. Architecture adaptation", "Motif-pair Stouffer z")
 
@@ -239,7 +246,7 @@ def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[d
     axes[1].axhline(0.0, color="#111827", linewidth=1.0, linestyle="--")
     delta_min = min(deltas + [0.0])
     delta_max = max(deltas + [0.0])
-    delta_pad = max(1.0, 0.12 * (delta_max - delta_min))
+    delta_pad = max(1.4, 0.18 * (delta_max - delta_min))
     axes[1].set_ylim(delta_min - delta_pad, delta_max + delta_pad)
     label_step = 0.04 * (delta_max - delta_min)
     for idx, delta in enumerate(deltas):
@@ -247,6 +254,7 @@ def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[d
         offset = label_step if delta >= 0 else -label_step
         axes[1].text(idx, delta + offset, f"{delta:+.1f}", ha="center", va=va, fontsize=9)
     axes[1].set_xticks(x2, [MODEL_LABELS[m] for m in variants])
+    axes[1].tick_params(axis="x", labelsize=9)
     setup_axes(axes[1], "B. Contrastive variants vs M2", "Delta Stouffer z")
 
     group_by_key = {(row["model_variant"].lower(), row["group"]): row for row in group_rows}
@@ -260,14 +268,16 @@ def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[d
         group_values.extend(y)
         axes[2].plot(x3, y, marker="o", linewidth=2.3, label=group.upper(), color=color)
         peak = int(np.nanargmax(y))
-        axes[2].text(peak, y[peak] + max(y) * 0.05, f"{y[peak]:.1f}", ha="center", fontsize=9, color=color)
+        label_offset = 0.04 * (max(y) - min(y))
+        axes[2].text(peak, y[peak] + label_offset, f"{y[peak]:.1f}", ha="center", fontsize=9, color=color)
     if group_values:
         group_min = min(group_values + [0.0])
         group_max = max(group_values + [0.0])
-        group_pad = max(1.0, 0.12 * (group_max - group_min))
+        group_pad = max(1.8, 0.18 * (group_max - group_min))
         axes[2].set_ylim(group_min - group_pad, group_max + group_pad)
     axes[2].axhline(0.0, color="#111827", linewidth=1.0, linestyle="--")
     axes[2].set_xticks(x3, [MODEL_LABELS[m] for m in group_models])
+    axes[2].tick_params(axis="x", labelsize=9)
     setup_axes(axes[2], "C. Group-specific contrastive signal", "Group Stouffer z")
     axes[2].legend(frameon=False, fontsize=9)
 
