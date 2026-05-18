@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import inspect
 import json
 import os
 import sys
@@ -67,6 +68,14 @@ def _load_wrapper(name: str):
         return wrapper.load_model
     if name == "evo":
         from evo_baseline import step4_evo_evaluate as wrapper
+
+        return wrapper.load_model
+    if name == "hyena":
+        root = os.path.dirname(os.path.dirname(__file__))
+        hyena_src = os.path.join(root, "src_hyena")
+        if hyena_src not in sys.path:
+            sys.path.insert(0, hyena_src)
+        import step4_hyena_evaluate as wrapper
 
         return wrapper.load_model
     raise ValueError(f"Unknown loader {name!r}")
@@ -195,14 +204,37 @@ def valid_mutation_positions(input_ids: torch.Tensor, alphabet_ids: list[int]) -
     return [i for i, token_id in enumerate(ids) if int(token_id) in alphabet]
 
 
+def call_model_with_supported_kwargs(model, kwargs: dict):
+    supported = getattr(model, "_cached_forward_supported_kwargs", None)
+    if supported is None:
+        try:
+            signature = inspect.signature(model.forward)
+        except (TypeError, ValueError):
+            supported = False
+        else:
+            params = signature.parameters
+            accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+            supported = None if accepts_kwargs else frozenset(params)
+        setattr(model, "_cached_forward_supported_kwargs", supported)
+
+    if supported is None:
+        return model(**kwargs)
+    if supported is False:
+        try:
+            return model(**kwargs)
+        except TypeError:
+            fallback = {k: v for k, v in kwargs.items() if k not in ("use_cache", "return_dict")}
+            return model(**fallback)
+    filtered = {k: v for k, v in kwargs.items() if k in supported}
+    return model(**filtered)
+
+
 def forward_logits(model, input_ids: torch.Tensor, attention_mask: torch.Tensor | None, token_ids: list[int]):
     kwargs = {"input_ids": input_ids}
     if attention_mask is not None:
         kwargs["attention_mask"] = attention_mask
-    try:
-        out = model(**kwargs, use_cache=False)
-    except TypeError:
-        out = model(**kwargs)
+    kwargs["use_cache"] = False
+    out = call_model_with_supported_kwargs(model, kwargs)
     logits = out.logits if hasattr(out, "logits") else out[0]
     return logits[..., token_ids].detach().cpu().float()
 
@@ -210,6 +242,11 @@ def forward_logits(model, input_ids: torch.Tensor, attention_mask: torch.Tensor 
 def _evo_backbone_hidden(model, input_ids: torch.Tensor, attention_mask: torch.Tensor | None):
     backbone = getattr(model, "backbone", None)
     if backbone is None:
+        return None
+    embedding_layer = getattr(backbone, "embedding_layer", None)
+    if embedding_layer is None or not hasattr(embedding_layer, "embed"):
+        return None
+    if not hasattr(backbone, "stateless_forward"):
         return None
     hidden = backbone.embedding_layer.embed(input_ids)
     hidden, _ = backbone.stateless_forward(hidden, padding_mask=attention_mask)
@@ -229,10 +266,9 @@ def forward_hidden(model, input_ids: torch.Tensor, attention_mask: torch.Tensor 
         kwargs = {"input_ids": input_ids}
         if attention_mask is not None:
             kwargs["attention_mask"] = attention_mask
-        try:
-            out = model(**kwargs, output_hidden_states=False, use_cache=False)
-        except TypeError:
-            out = model(**kwargs)
+        kwargs["output_hidden_states"] = False
+        kwargs["use_cache"] = False
+        out = call_model_with_supported_kwargs(model, kwargs)
 
     if hasattr(out, "last_hidden_state"):
         hidden = out.last_hidden_state
@@ -364,7 +400,7 @@ def parse_args():
     p.add_argument("--model", required=True, help="Model spec: name:path:mode")
     p.add_argument(
         "--loader",
-        choices=("generic", "dnagpt", "maskedlm", "dnabert2", "caduceus", "evo"),
+        choices=("generic", "dnagpt", "maskedlm", "dnabert2", "caduceus", "evo", "hyena"),
         default="generic",
         help="Optional Step4 wrapper loader for fragile remote-code models.",
     )

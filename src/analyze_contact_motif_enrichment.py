@@ -48,7 +48,7 @@ def label_from_path(path: Path) -> str:
 
 
 def parse_contact_label(label: str):
-    variant = re.match(r"^(m\d+)", label, flags=re.IGNORECASE)
+    variant = re.match(r"^([a-z]+\d+)", label, flags=re.IGNORECASE)
     epi = re.search(r"(?:^|_)gm12878_([01])_(\d+)$", label, flags=re.IGNORECASE)
     hg38 = re.search(r"_(chr[^_]+)_(\d+)_(\d+)$", label, flags=re.IGNORECASE)
     parsed = {
@@ -89,6 +89,14 @@ def run_self_test():
             "chrom": "chr3",
             "window_start_1based": "100",
             "window_end_1based": "4096",
+        },
+        "h0_chr10_100_8191": {
+            "model_variant": "h0",
+            "epi_label": "",
+            "sample_index": "",
+            "chrom": "chr10",
+            "window_start_1based": "100",
+            "window_end_1based": "8191",
         },
     }
     for label, expected in cases.items():

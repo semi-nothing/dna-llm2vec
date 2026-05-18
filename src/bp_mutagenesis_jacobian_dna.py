@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gc
+import inspect
 import json
 import os
 import sys
@@ -203,9 +204,39 @@ def attention_mask_or_default(tokenizer, input_ids: torch.Tensor, enc: dict[str,
     return (input_ids != pad_token_id).long()
 
 
+def call_model_with_supported_kwargs(model, kwargs: dict):
+    supported = getattr(model, "_cached_forward_supported_kwargs", None)
+    if supported is None:
+        try:
+            signature = inspect.signature(model.forward)
+        except (TypeError, ValueError):
+            supported = False
+        else:
+            params = signature.parameters
+            accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+            supported = None if accepts_kwargs else frozenset(params)
+        setattr(model, "_cached_forward_supported_kwargs", supported)
+
+    if supported is None:
+        return model(**kwargs)
+    if supported is False:
+        try:
+            return model(**kwargs)
+        except TypeError:
+            fallback = {k: v for k, v in kwargs.items() if k not in ("use_cache", "return_dict")}
+            return model(**fallback)
+    filtered = {k: v for k, v in kwargs.items() if k in supported}
+    return model(**filtered)
+
+
 def _evo_backbone_hidden(model, input_ids: torch.Tensor, attention_mask: torch.Tensor | None):
     backbone = getattr(model, "backbone", None)
     if backbone is None:
+        return None
+    embedding_layer = getattr(backbone, "embedding_layer", None)
+    if embedding_layer is None or not hasattr(embedding_layer, "embed"):
+        return None
+    if not hasattr(backbone, "stateless_forward"):
         return None
     hidden = backbone.embedding_layer.embed(input_ids)
     hidden, _ = backbone.stateless_forward(hidden, padding_mask=attention_mask)
@@ -228,10 +259,9 @@ def forward_hidden(model, enc: dict[str, torch.Tensor], tokenizer):
         kwargs = {"input_ids": input_ids}
         if attention_mask is not None:
             kwargs["attention_mask"] = attention_mask
-        try:
-            out = model(**kwargs, use_cache=False, output_hidden_states=True)
-        except TypeError:
-            out = model(**kwargs, output_hidden_states=True)
+        kwargs["use_cache"] = False
+        kwargs["output_hidden_states"] = True
+        out = call_model_with_supported_kwargs(model, kwargs)
 
     if hasattr(out, "last_hidden_state"):
         hidden = out.last_hidden_state
@@ -371,7 +401,7 @@ def parse_args():
     p.add_argument("--model", required=True, help="Model spec: name:path:mode")
     p.add_argument(
         "--loader",
-        choices=("generic", "dnagpt", "maskedlm", "dnabert2", "caduceus", "evo"),
+        choices=("generic", "dnagpt", "maskedlm", "dnabert2", "caduceus", "evo", "hyena"),
         default="generic",
     )
     src = p.add_mutually_exclusive_group(required=True)
