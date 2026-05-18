@@ -249,20 +249,18 @@ def prepare_permutation_bins(top_mask: np.ndarray, bins: np.ndarray):
 
 
 def permutation_background(pair_is_motif: np.ndarray, bin_specs: list[tuple[np.ndarray, int, bool]], n_perm: int, seed: int):
+    if not bin_specs:
+        return np.array([], dtype=np.float32)
     rng = np.random.default_rng(seed)
     bg = np.empty(n_perm, dtype=np.float32)
-    n_bg = 0
-    for _ in range(n_perm):
+    total_draws = sum(n_take for _, n_take, _ in bin_specs)
+    for perm_idx in range(n_perm):
         total_hits = 0
-        total_draws = 0
         for pool, n_take, replace in bin_specs:
             idx = rng.choice(pool, size=n_take, replace=replace)
             total_hits += int(np.count_nonzero(pair_is_motif[idx]))
-            total_draws += n_take
-        if total_draws:
-            bg[n_bg] = total_hits / total_draws
-            n_bg += 1
-    return bg[:n_bg]
+        bg[perm_idx] = total_hits / total_draws
+    return bg
 
 
 def enrichment_stats(
