@@ -82,7 +82,7 @@ class HyenaDNAForMaskedAdaptation(nn.Module):
     def __init__(self, base_model):
         super().__init__()
         self.base_model = base_model
-        self.config = base_model.config
+        self.config = _base_model_for_config(base_model).config
 
     def forward(
         self,
@@ -114,7 +114,65 @@ class HyenaDNAForMaskedAdaptation(nn.Module):
         return MaskedLMOutput(loss=loss, logits=logits)
 
     def save_pretrained(self, save_dir: str):
-        save_hyena_checkpoint(self.base_model, None, save_dir)
+        model_to_save = self.base_model
+        if hasattr(model_to_save, "merge_and_unload"):
+            os.makedirs(save_dir, exist_ok=True)
+            model_to_save.save_pretrained(save_dir)
+            return
+        save_hyena_checkpoint(model_to_save, None, save_dir)
+
+    def save_merged_pretrained(self, save_dir: str):
+        model_to_save = self.base_model
+        if hasattr(model_to_save, "merge_and_unload"):
+            print("  Saving merged LoRA checkpoint")
+            model_to_save = model_to_save.merge_and_unload()
+        save_hyena_checkpoint(model_to_save, None, save_dir)
+
+
+def _base_model_for_config(model):
+    if hasattr(model, "base_model") and hasattr(model.base_model, "model"):
+        return model.base_model.model
+    return model
+
+
+def build_hyena_lora_config(args):
+    from peft import LoraConfig, TaskType
+
+    targets = [item.strip() for item in args.lora_target_modules.split(",") if item.strip()]
+    return LoraConfig(
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        target_modules=targets,
+        lora_dropout=args.lora_dropout,
+        bias="none",
+        task_type=TaskType.CAUSAL_LM,
+    )
+
+
+def apply_hyena_lora(base_model, args):
+    from peft import get_peft_model
+
+    peft_model = get_peft_model(base_model, build_hyena_lora_config(args))
+    if args.train_mask_embedding:
+        restrict_embedding_grad_to_mask_row(peft_model, args.mask_token_id)
+    peft_model.print_trainable_parameters()
+    return peft_model
+
+
+def restrict_embedding_grad_to_mask_row(model, mask_token_id: int) -> None:
+    embeddings = model.get_input_embeddings()
+    if embeddings is None or not hasattr(embeddings, "weight"):
+        raise RuntimeError("Could not find input embeddings for mask-row training.")
+    weight = embeddings.weight
+    weight.requires_grad_(True)
+    keep = torch.zeros(weight.shape[0], dtype=weight.dtype, device=weight.device)
+    keep[mask_token_id] = 1
+
+    def hook(grad):
+        return grad * keep[:, None].to(dtype=grad.dtype, device=grad.device)
+
+    weight.register_hook(hook)
+    print("  Mask embedding policy    : train [MASK] row only")
 
 
 class HyenaTrainer(Trainer):
@@ -166,9 +224,7 @@ def build_training_args(args) -> TrainingArguments:
         eval_steps=args.eval_steps,
         save_total_limit=2,
         save_strategy=save_strategy,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
+        load_best_model_at_end=(args.train_mode == "full"),
         dataloader_num_workers=args.dataloader_num_workers,
         dataloader_pin_memory=torch.cuda.is_available(),
         remove_unused_columns=False,
@@ -180,6 +236,9 @@ def build_training_args(args) -> TrainingArguments:
         bf16_full_eval=bf16_ok,
         gradient_checkpointing=args.gradient_checkpointing,
     )
+    if args.train_mode == "full":
+        kwargs["metric_for_best_model"] = "eval_loss"
+        kwargs["greater_is_better"] = False
     training_args_params = inspect.signature(TrainingArguments.__init__).parameters
     if "eval_strategy" in training_args_params:
         kwargs["eval_strategy"] = eval_strategy
@@ -315,9 +374,12 @@ def smoke_test(args):
     ensure_mask_token(tokenizer, base_model)
     if tokenizer.mask_token_id in {tokenizer.pad_token_id, tokenizer.eos_token_id}:
         raise RuntimeError("[MASK] token must be distinct from PAD/EOS for HyenaDNA adaptation.")
+    args.mask_token_id = tokenizer.mask_token_id
 
     if hasattr(base_model, "gradient_checkpointing_enable") and args.gradient_checkpointing:
         base_model.gradient_checkpointing_enable()
+    if args.train_mode == "lora":
+        base_model = apply_hyena_lora(base_model, args)
 
     wrapper = HyenaDNAForMaskedAdaptation(base_model)
     wrapper.train()
@@ -337,7 +399,7 @@ def smoke_test(args):
     batch = collator([dataset[i] for i in range(4)])
     batch = {k: v.to(device) for k, v in batch.items()}
 
-    optimizer = torch.optim.AdamW(wrapper.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW([p for p in wrapper.parameters() if p.requires_grad], lr=args.lr)
     out = wrapper(**batch)
     loss = out.loss
     if loss is None:
@@ -380,7 +442,21 @@ def parse_args():
     p.add_argument("--span-min-length", type=int, default=3)
     p.add_argument("--span-max-length", type=int, default=20)
 
-    p.add_argument("--train-mode", choices=["full", "adapter_or_lora"], default="full")
+    p.add_argument("--train-mode", choices=["full", "lora"], default="full")
+    p.add_argument("--lora-r", type=int, default=8)
+    p.add_argument("--lora-alpha", type=int, default=16)
+    p.add_argument("--lora-dropout", type=float, default=0.05)
+    p.add_argument(
+        "--lora-target-modules",
+        default="in_proj,out_proj,fc1,fc2",
+        help="Comma-separated module-name suffixes for PEFT LoRA.",
+    )
+    p.add_argument(
+        "--train-mask-embedding",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Train only the [MASK] embedding row alongside LoRA adapters.",
+    )
     p.add_argument("--epochs", type=float, default=1.0)
     p.add_argument("--max-steps", type=int, default=-1)
     p.add_argument("--batch-size", type=int, default=16)
@@ -401,11 +477,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.train_mode != "full":
-        raise NotImplementedError(
-            "HyenaDNA Step 2 currently prioritises full fine-tuning. "
-            "adapter_or_lora is intentionally left unimplemented for now."
-        )
 
     set_seed(args.seed)
 
@@ -427,6 +498,9 @@ def main():
     print(f"  Device                   : {device}")
     print(f"  Precision                : {dtype}")
     print(f"  Train mode               : {args.train_mode}")
+    if args.train_mode == "lora":
+        print(f"  LoRA                     : r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
+        print(f"  LoRA targets             : {args.lora_target_modules}")
     print(f"  Masking mode             : {args.masking_mode}")
     print(f"  Mask probability         : {args.mask_probability}")
     print(f"  Replacement policy       : {args.replacement_policy}")
@@ -453,10 +527,14 @@ def main():
     else:
         print(f"  Mask token               : existing {tokenizer.mask_token!r}")
     print(f"  Mask token id            : {tokenizer.mask_token_id}")
+    args.mask_token_id = tokenizer.mask_token_id
 
     if hasattr(base_model, "gradient_checkpointing_enable") and args.gradient_checkpointing:
         base_model.gradient_checkpointing_enable()
         print("  Gradient checkpointing   : enabled")
+
+    if args.train_mode == "lora":
+        base_model = apply_hyena_lora(base_model, args)
 
     wrapper = HyenaDNAForMaskedAdaptation(base_model)
 
@@ -513,8 +591,9 @@ def main():
     trainer.train()
 
     print("\n[3/4] Saving H2 checkpoint")
-    wrapper.base_model.config.hyena_training_stage = "H2"
-    wrapper.save_pretrained(args.output)
+    _base_model_for_config(wrapper.base_model).config.hyena_training_stage = "H2"
+    _base_model_for_config(wrapper.base_model).config.hyena_train_mode = args.train_mode
+    wrapper.save_merged_pretrained(args.output)
     tokenizer.save_pretrained(args.output)
     print(f"  Saved H2 checkpoint      : {args.output}")
 

@@ -201,8 +201,13 @@ def plot_paired(summary_rows: list[dict[str, str]], output_dir: str, ref_model: 
 
 def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[dict[str, str]], output_dir: str):
     rows_by_model = {row["model_variant"].lower(): row for row in aggregate_rows}
-    required = {"m0", "m1", "m2", "m3", "m4", "m5", "m6"}
-    if not required.issubset(rows_by_model):
+    model_prefix = None
+    for prefix in ("m", "h"):
+        required = {f"{prefix}{idx}" for idx in range(7)}
+        if required.issubset(rows_by_model):
+            model_prefix = prefix
+            break
+    if model_prefix is None:
         return
 
     fig = plt.figure(figsize=(10.5, 7.2), constrained_layout=True)
@@ -213,7 +218,7 @@ def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[d
         fig.add_subplot(spec[1, :]),
     ]
 
-    chain = ["m0", "m1", "m2"]
+    chain = [f"{model_prefix}{idx}" for idx in range(3)]
     chain_z = [f(rows_by_model[m], "stouffer_z") for m in chain]
     x = np.arange(len(chain))
     axes[0].plot(x, chain_z, marker="o", linewidth=2.5, color="#111827")
@@ -237,8 +242,9 @@ def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[d
     axes[0].set_ylim(0, max(chain_z) * 1.22)
     setup_axes(axes[0], "A. Architecture adaptation", "Motif-pair Stouffer z")
 
-    variants = ["m3", "m4", "m5", "m6"]
-    baseline = f(rows_by_model["m2"], "stouffer_z")
+    variants = [f"{model_prefix}{idx}" for idx in range(3, 7)]
+    baseline_model = f"{model_prefix}2"
+    baseline = f(rows_by_model[baseline_model], "stouffer_z")
     deltas = [f(rows_by_model[m], "stouffer_z") - baseline for m in variants]
     x2 = np.arange(len(variants))
     colors = [MODEL_COLORS[m] for m in variants]
@@ -255,10 +261,10 @@ def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[d
         axes[1].text(idx, delta + offset, f"{delta:+.1f}", ha="center", va=va, fontsize=9)
     axes[1].set_xticks(x2, [MODEL_LABELS[m] for m in variants])
     axes[1].tick_params(axis="x", labelsize=9)
-    setup_axes(axes[1], "B. Contrastive variants vs M2", "Delta Stouffer z")
+    setup_axes(axes[1], f"B. Contrastive variants vs {baseline_model.upper()}", "Delta Stouffer z")
 
     group_by_key = {(row["model_variant"].lower(), row["group"]): row for row in group_rows}
-    group_models = ["m2", "m3", "m4", "m5", "m6"]
+    group_models = [f"{model_prefix}{idx}" for idx in range(2, 7)]
     x3 = np.arange(len(group_models))
     group_values = []
     for group, color in (("promoter", "#2563eb"), ("tfbs", "#dc2626")):
