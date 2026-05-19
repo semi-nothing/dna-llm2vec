@@ -598,6 +598,52 @@ def run_one(args, sequence: str, model, tokenizer, spec, device: str, source_met
     return contact, positions
 
 
+def run_rc_consistency(args, sequence: str, contact: np.ndarray, positions: list[int], model, tokenizer, spec, device: str, source_meta: dict | None = None):
+    rc_sequence = reverse_complement(sequence)
+    rc_meta = dict(source_meta or {})
+    rc_meta["source_type"] = f"{rc_meta.get('source_type', 'sequence')}_reverse_complement"
+    rc_contact, rc_positions = run_one(
+        args,
+        rc_sequence,
+        model,
+        tokenizer,
+        spec,
+        device,
+        source_meta=rc_meta,
+        suffix="_rc",
+    )
+    rc_pos_to_idx = {pos: idx for idx, pos in enumerate(rc_positions)}
+    aligned = [
+        (fwd_idx, rc_pos_to_idx[len(sequence) - 1 - pos], pos)
+        for fwd_idx, pos in enumerate(positions)
+        if (len(sequence) - 1 - pos) in rc_pos_to_idx
+    ]
+    if len(aligned) < 2:
+        raise ValueError(
+            "RC consistency has fewer than two coordinate-aligned positions after "
+            "token-visible filtering. Increase --max-length or use a shorter window."
+        )
+    fwd_idx = np.array([item[0] for item in aligned], dtype=np.int32)
+    rc_idx = np.array([item[1] for item in aligned], dtype=np.int32)
+    aligned_positions = np.array([item[2] for item in aligned], dtype=np.int32)
+    contact_aligned = contact[np.ix_(fwd_idx, fwd_idx)]
+    rc_flipped_aligned = rc_contact[np.ix_(rc_idx, rc_idx)]
+    corr = float(np.corrcoef(contact_aligned.ravel(), rc_flipped_aligned.ravel())[0, 1])
+    np.savez_compressed(
+        f"{args.output_prefix}_rc_compare.npz",
+        contact_aligned=contact_aligned,
+        rc_flipped_aligned=rc_flipped_aligned,
+        forward_positions=aligned_positions,
+        rc_positions=np.array([len(sequence) - 1 - pos for pos in aligned_positions], dtype=np.int32),
+        corr=corr,
+    )
+    print(
+        "RC contact correlation:",
+        f"{corr:.4f}",
+        f"(aligned positions {len(aligned)}/{len(positions)} forward, {len(rc_positions)} rc)",
+    )
+
+
 def main():
     args = parse_args()
     if any(len(base) != 1 for base in args.alphabet):
@@ -640,8 +686,6 @@ def main():
     ensure_padding(tokenizer)
 
     if args.fasta is not None and len(args.fasta) > 1:
-        if args.rc_consistency:
-            raise ValueError("--rc-consistency is only supported for a single input sequence/fasta")
         original_output_prefix = args.output_prefix
         for idx, fasta_path in enumerate(args.fasta, start=1):
             print("=" * 72)
@@ -654,7 +698,9 @@ def main():
             )
             sequence = _read_fasta(fasta_path).strip()
             source_meta = {"source": fasta_path, "source_type": "fasta"}
-            run_one(args, sequence, model, tokenizer, spec, device, source_meta=source_meta)
+            contact, positions = run_one(args, sequence, model, tokenizer, spec, device, source_meta=source_meta)
+            if args.rc_consistency:
+                run_rc_consistency(args, sequence, contact, positions, model, tokenizer, spec, device, source_meta=source_meta)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()
@@ -664,49 +710,7 @@ def main():
     contact, positions = run_one(args, sequence, model, tokenizer, spec, device, source_meta=source_meta)
 
     if args.rc_consistency:
-        rc_sequence = reverse_complement(sequence)
-        rc_meta = dict(source_meta)
-        rc_meta["source_type"] = f"{rc_meta.get('source_type', 'sequence')}_reverse_complement"
-        rc_contact, rc_positions = run_one(
-            args,
-            rc_sequence,
-            model,
-            tokenizer,
-            spec,
-            device,
-            source_meta=rc_meta,
-            suffix="_rc",
-        )
-        rc_pos_to_idx = {pos: idx for idx, pos in enumerate(rc_positions)}
-        aligned = [
-            (fwd_idx, rc_pos_to_idx[len(sequence) - 1 - pos], pos)
-            for fwd_idx, pos in enumerate(positions)
-            if (len(sequence) - 1 - pos) in rc_pos_to_idx
-        ]
-        if len(aligned) < 2:
-            raise ValueError(
-                "RC consistency has fewer than two coordinate-aligned positions after "
-                "token-visible filtering. Increase --max-length or use a shorter window."
-            )
-        fwd_idx = np.array([item[0] for item in aligned], dtype=np.int32)
-        rc_idx = np.array([item[1] for item in aligned], dtype=np.int32)
-        aligned_positions = np.array([item[2] for item in aligned], dtype=np.int32)
-        contact_aligned = contact[np.ix_(fwd_idx, fwd_idx)]
-        rc_flipped_aligned = rc_contact[np.ix_(rc_idx, rc_idx)]
-        corr = float(np.corrcoef(contact_aligned.ravel(), rc_flipped_aligned.ravel())[0, 1])
-        np.savez_compressed(
-            f"{args.output_prefix}_rc_compare.npz",
-            contact_aligned=contact_aligned,
-            rc_flipped_aligned=rc_flipped_aligned,
-            forward_positions=aligned_positions,
-            rc_positions=np.array([len(sequence) - 1 - pos for pos in aligned_positions], dtype=np.int32),
-            corr=corr,
-        )
-        print(
-            "RC contact correlation:",
-            f"{corr:.4f}",
-            f"(aligned positions {len(aligned)}/{len(positions)} forward, {len(rc_positions)} rc)",
-        )
+        run_rc_consistency(args, sequence, contact, positions, model, tokenizer, spec, device, source_meta=source_meta)
 
 
 if __name__ == "__main__":
