@@ -136,7 +136,7 @@ def _base_model_for_config(model):
 
 
 def build_hyena_lora_config(args):
-    from peft import LoraConfig, TaskType
+    from peft import LoraConfig
 
     targets = [item.strip() for item in args.lora_target_modules.split(",") if item.strip()]
     return LoraConfig(
@@ -145,7 +145,6 @@ def build_hyena_lora_config(args):
         target_modules=targets,
         lora_dropout=args.lora_dropout,
         bias="none",
-        task_type=TaskType.CAUSAL_LM,
     )
 
 
