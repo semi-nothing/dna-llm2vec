@@ -44,7 +44,7 @@ from typing import Any
 import numpy as np
 
 
-MODEL_RE = re.compile(r"(?<![A-Za-z0-9])(M[0-6])(?![A-Za-z0-9])", re.IGNORECASE)
+MODEL_RE = re.compile(r"(?<![A-Za-z0-9])([MH][0-6])(?![A-Za-z0-9])", re.IGNORECASE)
 SEED_RE = re.compile(r"(?:seed|s)(\d+)", re.IGNORECASE)
 REP_RE = re.compile(r"(?:repeat|rep|r)(\d+)", re.IGNORECASE)
 
@@ -108,10 +108,28 @@ def infer_fragment(path: Path) -> str:
 def model_sort_key(model: str) -> tuple[int, int | str]:
     match = MODEL_RE.fullmatch(model)
     if match:
-        return (0, int(match.group(1)[1:]))
+        prefix = 0 if match.group(1)[0].upper() == "M" else 1
+        return (prefix, int(match.group(1)[1:]))
     if model == "UNKNOWN":
-        return (2, model)
-    return (1, model)
+        return (3, model)
+    return (2, model)
+
+
+def collect_files(root: Path, model_family: str) -> list[Path]:
+    if model_family == "dnagpt":
+        allowed = re.compile(r"m[0-6]", re.IGNORECASE)
+    elif model_family == "hyena":
+        allowed = re.compile(r"h[0-6]", re.IGNORECASE)
+    elif model_family == "all":
+        return sorted(root.rglob("*_rc_compare.npz"))
+    else:
+        raise ValueError(f"Unknown model family: {model_family}")
+
+    files: list[Path] = []
+    for child in root.iterdir():
+        if child.is_dir() and allowed.fullmatch(child.name):
+            files.extend(child.rglob("*_rc_compare.npz"))
+    return sorted(files)
 
 
 def fmt(value: float) -> str:
@@ -256,6 +274,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", required=True, help="Parent directory containing m0/... m6/... results.")
     parser.add_argument("--metric", default="corr", help="Scalar key inside *_rc_compare.npz (default: corr).")
     parser.add_argument("--out-prefix", default="rc_consistent_summary", help="Output path prefix.")
+    parser.add_argument(
+        "--model-family",
+        choices=("dnagpt", "hyena", "all"),
+        default="dnagpt",
+        help="Which top-level model folders to scan: dnagpt=m0-m6, hyena=h0-h6, all=everything.",
+    )
     parser.add_argument("--list-metrics", action="store_true", help="Print scalar numeric npz keys and exit.")
     parser.add_argument("--sample-std", action="store_true", help="Use sample std instead of population std.")
     return parser.parse_args()
@@ -264,10 +288,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     root = Path(args.input_dir)
-    files = sorted(root.rglob("*_rc_compare.npz"))
+    files = collect_files(root, args.model_family)
 
     if not files:
-        raise SystemExit(f"No *_rc_compare.npz files found under {root}")
+        raise SystemExit(f"No *_rc_compare.npz files found under {root} for --model-family {args.model_family}")
 
     if args.list_metrics:
         list_metrics(files)
