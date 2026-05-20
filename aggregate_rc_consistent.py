@@ -45,8 +45,8 @@ import numpy as np
 
 
 MODEL_RE = re.compile(r"(?<![A-Za-z0-9])([MH][0-6])(?![A-Za-z0-9])", re.IGNORECASE)
-SEED_RE = re.compile(r"(?:seed|s)(\d+)", re.IGNORECASE)
-REP_RE = re.compile(r"(?:repeat|rep|r)(\d+)", re.IGNORECASE)
+SEED_RE = re.compile(r"(?<![A-Za-z0-9])(?:seed|s)(\d+)(?![A-Za-z0-9])", re.IGNORECASE)
+REP_RE = re.compile(r"(?<![A-Za-z0-9])(?:repeat|rep|r)(\d+)(?![A-Za-z0-9])", re.IGNORECASE)
 
 
 def as_float(value: Any) -> float | None:
