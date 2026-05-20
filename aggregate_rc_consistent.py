@@ -1,82 +1,60 @@
 #!/usr/bin/env python3
 """
-Aggregate DNAGPT RC-consistency results across M0-M6.
+Aggregate DNAGPT RC-consistency outputs written by bp_mutagenesis_jacobian_dna.py.
 
-Expected usage on the remote machine:
+This script is for results like:
+
+    /gpfs/scratch/bty252/dna_foundation_model/figures/rc_consistency/
+      m0/**/*_rc_compare.npz
+      m1/**/*_rc_compare.npz
+      ...
+      m6/**/*_rc_compare.npz
+
+Each *_rc_compare.npz contains:
+
+    corr                  scalar correlation between forward and RC-flipped contact maps
+    contact_aligned       forward contact map after coordinate alignment
+    rc_flipped_aligned    reverse-complement contact map after flipping/alignment
+    forward_positions     aligned forward bp positions
+    rc_positions          aligned RC bp positions
+
+Example:
 
     python aggregate_rc_consistent.py \
       --input-dir /gpfs/scratch/bty252/dna_foundation_model/figures/rc_consistency \
       --out-prefix /gpfs/scratch/bty252/dna_foundation_model/figures/rc_consistency/rc_consistent_summary
 
-The script recursively scans JSON/CSV files under --input-dir. It supports
-layouts like:
+Outputs:
 
-    rc_consistency/m0/*.json
-    rc_consistency/m1/*.json
-    ...
-    rc_consistency/m6/*.json
-
-It writes:
-
-    <out-prefix>.csv      summary table
-    <out-prefix>.md       Markdown summary table
-    <out-prefix>.raw.csv  per-file/per-run extracted values
+    <out-prefix>.csv      per-model mean/std summary
+    <out-prefix>.md       Markdown table
+    <out-prefix>.raw.csv  one row per *_rc_compare.npz
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import json
 import math
 import re
 from pathlib import Path
 from statistics import mean, pstdev, stdev
 from typing import Any
 
+import numpy as np
+
 
 MODEL_RE = re.compile(r"(?<![A-Za-z0-9])(M[0-6])(?![A-Za-z0-9])", re.IGNORECASE)
 SEED_RE = re.compile(r"(?:seed|s)(\d+)", re.IGNORECASE)
 REP_RE = re.compile(r"(?:repeat|rep|r)(\d+)", re.IGNORECASE)
 
-DEFAULT_METRIC_CANDIDATES = [
-    "rc_consistency",
-    "rc_consistent",
-    "rc_consistency_score",
-    "rc_score",
-    "consistency",
-    "agreement",
-    "same_pred_rate",
-    "same_prediction_rate",
-    "rc_agreement",
-    "cosine",
-    "mean_cosine",
-    "avg_cosine",
-    "pearson",
-    "spearman",
-]
-
-
-def flatten(obj: Any, prefix: str = "") -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            next_key = f"{prefix}.{key}" if prefix else str(key)
-            out.update(flatten(value, next_key))
-    elif isinstance(obj, list):
-        for idx, value in enumerate(obj):
-            next_key = f"{prefix}.{idx}" if prefix else str(idx)
-            out.update(flatten(value, next_key))
-    else:
-        out[prefix] = obj
-    return out
-
 
 def as_float(value: Any) -> float | None:
     try:
-        if value is None or value == "":
+        arr = np.asarray(value)
+        if arr.size != 1:
             return None
-        out = float(value)
+        out = float(arr.reshape(-1)[0])
         if math.isnan(out) or math.isinf(out):
             return None
         return out
@@ -84,12 +62,11 @@ def as_float(value: Any) -> float | None:
         return None
 
 
-def infer_model(path: Path, row: dict[str, Any]) -> str:
-    for key in ("model", "model_name", "name"):
-        value = str(row.get(key, "")).strip()
-        if value:
-            match = MODEL_RE.search(value)
-            return match.group(1).upper() if match else value
+def infer_model(path: Path) -> str:
+    for part in path.parts:
+        match = MODEL_RE.fullmatch(part)
+        if match:
+            return match.group(1).upper()
 
     for part in path.parts:
         match = MODEL_RE.search(part)
@@ -99,82 +76,33 @@ def infer_model(path: Path, row: dict[str, Any]) -> str:
     return "UNKNOWN"
 
 
-def infer_seed(path: Path, row: dict[str, Any]) -> str:
-    for key in ("seed", "random_seed"):
-        value = str(row.get(key, "")).strip()
-        if value:
-            return value
-
+def infer_seed(path: Path) -> str:
     match = SEED_RE.search(path.name)
-    return match.group(1) if match else ""
+    if match:
+        return match.group(1)
+    for part in reversed(path.parts):
+        match = SEED_RE.search(part)
+        if match:
+            return match.group(1)
+    return ""
 
 
-def infer_repeat(path: Path, row: dict[str, Any]) -> str:
-    for key in ("repeat", "repeat_index", "rep", "run"):
-        value = str(row.get(key, "")).strip()
-        if value:
-            return value
-
+def infer_repeat(path: Path) -> str:
     match = REP_RE.search(path.name)
-    return match.group(1) if match else ""
+    if match:
+        return match.group(1)
+    for part in reversed(path.parts):
+        match = REP_RE.search(part)
+        if match:
+            return match.group(1)
+    return ""
 
 
-def load_json_rows(path: Path) -> list[dict[str, Any]]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    rows: list[dict[str, Any]] = []
-
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                rows.append(flatten(item))
-        return rows
-
-    if isinstance(data, dict):
-        rows.append(flatten(data))
-
-        # Support common nested result layouts, e.g.
-        # {"results": {"M0": {"rc_consistency": 0.9}, ...}}
-        for container_key in ("results", "models", "overall", "summary"):
-            container = data.get(container_key)
-            if isinstance(container, dict):
-                for model_name, metrics in container.items():
-                    if isinstance(metrics, dict):
-                        row = flatten(metrics)
-                        row["model"] = model_name
-                        rows.append(row)
-
-    return rows
-
-
-def load_csv_rows(path: Path) -> list[dict[str, Any]]:
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        return list(csv.DictReader(handle))
-
-
-def discover_metric(rows: list[tuple[Path, dict[str, Any]]]) -> str | None:
-    numeric_keys: dict[str, int] = {}
-    for _path, row in rows:
-        for key, value in row.items():
-            if as_float(value) is not None:
-                numeric_keys[key] = numeric_keys.get(key, 0) + 1
-
-    for candidate in DEFAULT_METRIC_CANDIDATES:
-        matches = [
-            key
-            for key in numeric_keys
-            if key.lower() == candidate.lower() or key.lower().endswith(f".{candidate.lower()}")
-        ]
-        if matches:
-            return sorted(matches, key=lambda key: numeric_keys[key], reverse=True)[0]
-
-    if not numeric_keys:
-        return None
-
-    return sorted(numeric_keys, key=lambda key: numeric_keys[key], reverse=True)[0]
-
-
-def fmt(value: float) -> str:
-    return f"{value:.4f}"
+def infer_fragment(path: Path) -> str:
+    name = path.name
+    if name.endswith("_rc_compare.npz"):
+        return name[: -len("_rc_compare.npz")]
+    return path.stem
 
 
 def model_sort_key(model: str) -> tuple[int, int | str]:
@@ -186,72 +114,62 @@ def model_sort_key(model: str) -> tuple[int, int | str]:
     return (1, model)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Aggregate RC-consistency results across M0-M6.")
-    parser.add_argument("--input-dir", required=True, help="Parent directory containing m0/... m6/... results.")
-    parser.add_argument("--metric", default=None, help="Metric key to aggregate. If omitted, inferred automatically.")
-    parser.add_argument("--out-prefix", default="rc_consistent_summary", help="Output path prefix.")
-    parser.add_argument("--list-metrics", action="store_true", help="Print numeric metric candidates and exit.")
-    parser.add_argument("--sample-std", action="store_true", help="Use sample std instead of population std.")
-    return parser.parse_args()
+def fmt(value: float) -> str:
+    return f"{value:.4f}"
 
 
-def main() -> None:
-    args = parse_args()
-    root = Path(args.input_dir)
-    files = sorted(list(root.rglob("*.json")) + list(root.rglob("*.csv")))
+def list_metrics(files: list[Path]) -> None:
+    counts: dict[str, int] = {}
+    examples: dict[str, str] = {}
 
-    all_rows: list[tuple[Path, dict[str, Any]]] = []
     for path in files:
         try:
-            rows = load_json_rows(path) if path.suffix.lower() == ".json" else load_csv_rows(path)
-            for row in rows:
-                all_rows.append((path, row))
+            with np.load(path, allow_pickle=True) as data:
+                for key in data.files:
+                    if as_float(data[key]) is not None:
+                        counts[key] = counts.get(key, 0) + 1
+                        examples.setdefault(key, str(np.asarray(data[key]).reshape(-1)[0]))
         except Exception as exc:
             print(f"[warn] skipping {path}: {exc}")
 
-    if not all_rows:
-        raise SystemExit(f"No JSON/CSV rows found under {root}")
+    print("Scalar numeric metric candidates in *_rc_compare.npz:")
+    for key in sorted(counts):
+        print(f"  {key}  ({counts[key]} files; example={examples[key]})")
 
-    numeric_keys = sorted(
-        {
-            key
-            for _path, row in all_rows
-            for key, value in row.items()
-            if as_float(value) is not None
-        }
-    )
 
-    if args.list_metrics:
-        print("Numeric metric candidates:")
-        for key in numeric_keys:
-            print(f"  {key}")
-        return
+def load_record(path: Path, metric: str) -> dict[str, Any] | None:
+    with np.load(path, allow_pickle=True) as data:
+        if metric not in data.files:
+            return None
 
-    metric = args.metric or discover_metric(all_rows)
-    if not metric:
-        raise SystemExit("Could not infer metric. Re-run with --list-metrics, then pass --metric KEY.")
-
-    records: list[dict[str, Any]] = []
-    for path, row in all_rows:
-        value = as_float(row.get(metric))
+        value = as_float(data[metric])
         if value is None:
-            continue
+            return None
 
-        records.append(
-            {
-                "model": infer_model(path, row),
-                "seed": infer_seed(path, row),
-                "repeat": infer_repeat(path, row),
-                "metric": metric,
-                "value": value,
-                "file": str(path),
-            }
-        )
+        n_aligned = ""
+        if "forward_positions" in data.files:
+            n_aligned = int(np.asarray(data["forward_positions"]).shape[0])
+        elif "contact_aligned" in data.files:
+            n_aligned = int(np.asarray(data["contact_aligned"]).shape[0])
 
-    if not records:
-        raise SystemExit(f"No values found for metric: {metric}")
+        contact_shape = ""
+        if "contact_aligned" in data.files:
+            contact_shape = "x".join(str(x) for x in np.asarray(data["contact_aligned"]).shape)
 
+    return {
+        "model": infer_model(path),
+        "seed": infer_seed(path),
+        "repeat": infer_repeat(path),
+        "fragment": infer_fragment(path),
+        "metric": metric,
+        "value": value,
+        "n_aligned_positions": n_aligned,
+        "contact_shape": contact_shape,
+        "file": str(path),
+    }
+
+
+def write_outputs(records: list[dict[str, Any]], sample_std: bool, out_prefix: Path, metric: str) -> None:
     by_model: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         by_model.setdefault(record["model"], []).append(record)
@@ -263,50 +181,111 @@ def main() -> None:
     summary: list[dict[str, Any]] = []
     for model in sorted(by_model, key=model_sort_key):
         values = [record["value"] for record in by_model[model]]
-        std = stdev(values) if args.sample_std and len(values) > 1 else pstdev(values)
         avg = mean(values)
+        std = stdev(values) if sample_std and len(values) > 1 else pstdev(values)
+        n_positions = [
+            record["n_aligned_positions"]
+            for record in by_model[model]
+            if isinstance(record["n_aligned_positions"], int)
+        ]
         summary.append(
             {
                 "model": model,
-                "n": len(values),
+                "n_fragments": len(values),
                 "mean": avg,
                 "std": std,
                 "delta_vs_M0": "" if baseline_mean is None else avg - baseline_mean,
+                "mean_aligned_positions": "" if not n_positions else mean(n_positions),
             }
         )
 
-    out_prefix = Path(args.out_prefix)
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
     out_csv = out_prefix.with_suffix(".csv")
     out_md = out_prefix.with_suffix(".md")
     out_raw = out_prefix.with_suffix(".raw.csv")
 
     with out_raw.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["model", "seed", "repeat", "metric", "value", "file"])
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "model",
+                "seed",
+                "repeat",
+                "fragment",
+                "metric",
+                "value",
+                "n_aligned_positions",
+                "contact_shape",
+                "file",
+            ],
+        )
         writer.writeheader()
         writer.writerows(records)
 
     with out_csv.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["model", "n", "mean", "std", "delta_vs_M0"])
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["model", "n_fragments", "mean", "std", "delta_vs_M0", "mean_aligned_positions"],
+        )
         writer.writeheader()
         writer.writerows(summary)
 
     with out_md.open("w", encoding="utf-8") as handle:
         handle.write("# RC-Consistency Summary\n\n")
-        handle.write(f"Metric: `{metric}`\n\n")
-        handle.write("| Model | n | mean +/- std | Delta vs M0 |\n")
-        handle.write("|---|---:|---:|---:|\n")
+        handle.write(f"Metric: `{metric}` from `*_rc_compare.npz`\n\n")
+        handle.write("| Model | fragments | mean +/- std | Delta vs M0 | mean aligned positions |\n")
+        handle.write("|---|---:|---:|---:|---:|\n")
         for row in summary:
             delta = "" if row["delta_vs_M0"] == "" else fmt(float(row["delta_vs_M0"]))
+            mean_pos = "" if row["mean_aligned_positions"] == "" else fmt(float(row["mean_aligned_positions"]))
             handle.write(
-                f"| {row['model']} | {row['n']} | "
-                f"{fmt(float(row['mean']))} +/- {fmt(float(row['std']))} | {delta} |\n"
+                f"| {row['model']} | {row['n_fragments']} | "
+                f"{fmt(float(row['mean']))} +/- {fmt(float(row['std']))} | "
+                f"{delta} | {mean_pos} |\n"
             )
 
     print(f"Metric: {metric}")
+    print(f"Records: {len(records)}")
     print(f"Wrote: {out_csv}")
     print(f"Wrote: {out_md}")
     print(f"Wrote: {out_raw}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Aggregate *_rc_compare.npz RC-consistency results.")
+    parser.add_argument("--input-dir", required=True, help="Parent directory containing m0/... m6/... results.")
+    parser.add_argument("--metric", default="corr", help="Scalar key inside *_rc_compare.npz (default: corr).")
+    parser.add_argument("--out-prefix", default="rc_consistent_summary", help="Output path prefix.")
+    parser.add_argument("--list-metrics", action="store_true", help="Print scalar numeric npz keys and exit.")
+    parser.add_argument("--sample-std", action="store_true", help="Use sample std instead of population std.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    root = Path(args.input_dir)
+    files = sorted(root.rglob("*_rc_compare.npz"))
+
+    if not files:
+        raise SystemExit(f"No *_rc_compare.npz files found under {root}")
+
+    if args.list_metrics:
+        list_metrics(files)
+        return
+
+    records: list[dict[str, Any]] = []
+    for path in files:
+        try:
+            record = load_record(path, args.metric)
+            if record is not None:
+                records.append(record)
+        except Exception as exc:
+            print(f"[warn] skipping {path}: {exc}")
+
+    if not records:
+        raise SystemExit(f"No scalar values found for metric {args.metric!r} under {root}")
+
+    write_outputs(records, args.sample_std, Path(args.out_prefix), args.metric)
 
 
 if __name__ == "__main__":
