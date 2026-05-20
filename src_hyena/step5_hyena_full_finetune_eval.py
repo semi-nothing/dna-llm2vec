@@ -203,7 +203,12 @@ def _attach_gradient_checkpointing_enable(model) -> None:
                     use_reentrant = gradient_checkpointing_kwargs.get("use_reentrant", False)
 
                 def _ckpt_func(fn, *args, _use_reentrant=use_reentrant, **kwargs):
-                    return checkpoint.checkpoint(fn, *args, use_reentrant=_use_reentrant, **kwargs)
+                    try:
+                        return checkpoint.checkpoint(fn, *args, use_reentrant=_use_reentrant, **kwargs)
+                    except TypeError:
+                        if kwargs:
+                            raise
+                        return checkpoint.checkpoint(fn, *args)
 
                 obj._gradient_checkpointing_func = _ckpt_func
 
@@ -214,7 +219,7 @@ def _attach_gradient_checkpointing_enable(model) -> None:
 
 def load_base_model(spec: HyenaModelSpec, device: str, dtype):
     path = os.path.abspath(spec.path) if os.path.exists(spec.path) else spec.path
-    print(f"  Loading {spec.name}  ({path}, mode={spec.mode}, hyena-full-ft)")
+    print(f"  Loading {spec.name}  ({path}, mode={spec.mode}, hyena-backbone)")
 
     tokenizer = load_hyena_tokenizer(path)
     model, load_path = load_hyena_backbone(path, device="cpu", dtype=dtype)

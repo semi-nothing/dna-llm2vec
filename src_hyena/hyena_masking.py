@@ -90,17 +90,16 @@ class HyenaDNASpanMaskingCollator:
         if random_positions.any():
             n_random = int(random_positions.sum().item())
             rand_idx = torch.randint(0, self.random_token_ids.numel(), (n_random,), device=input_ids.device)
-            input_ids[idx[random_positions]] = self.random_token_ids[rand_idx]
+            random_token_ids = self.random_token_ids.to(input_ids.device)
+            input_ids[idx[random_positions]] = random_token_ids[rand_idx]
 
     def _mask_one(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, special_tokens_mask: torch.Tensor):
         input_ids = input_ids.clone()
         labels = torch.full_like(input_ids, -100)
 
-        valid_positions = [
-            idx
-            for idx in range(input_ids.shape[0])
-            if attention_mask[idx].item() == 1 and special_tokens_mask[idx].item() == 0
-        ]
+        valid_positions = (
+            (attention_mask == 1) & (special_tokens_mask == 0)
+        ).nonzero(as_tuple=True)[0].tolist()
 
         if self.config.masking_mode == "single":
             masked_positions = _select_single_mask_positions(valid_positions, self.config.mask_probability)
@@ -118,7 +117,7 @@ class HyenaDNASpanMaskingCollator:
             masked_positions = {random.choice(valid_positions)}
 
         if masked_positions:
-            idx = torch.tensor(sorted(masked_positions), dtype=torch.long)
+            idx = torch.tensor(sorted(masked_positions), dtype=torch.long, device=input_ids.device)
             labels[idx] = input_ids[idx]
             self._apply_replacement_policy(input_ids, idx)
 

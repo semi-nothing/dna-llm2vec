@@ -432,7 +432,32 @@ def parse_args():
 
 
 def print_results_table(results: dict, benchmarks: list, title: str, metric: str = "accuracy"):
-    _ORIGINAL_PRINT_RESULTS_TABLE(results, benchmarks, title.replace("Full", "LoRA"), metric)
+    short_names = [b[2] for b in benchmarks]
+    model_names = list(results.keys())
+    col_w = max(max(len(n) for n in model_names), 6)
+    task_w = 13
+
+    print(f"\n{title}  [metric: {metric}, HyenaDNA LoRA fine-tuning]")
+    header = (
+        f"{'Model':<{col_w}}  "
+        + "  ".join(f"{n:>{task_w}}" for n in short_names)
+        + f"  {'Avg':>{task_w}}"
+    )
+    sep = "=" * len(header)
+    print(sep)
+    print(header)
+    print(sep)
+
+    for model_name, task_map in results.items():
+        vals = [base._metric_val(task_map.get(b[0], {}), metric) for b in benchmarks]
+        avg = np.nanmean(vals)
+        row = f"{model_name:<{col_w}}  "
+        row += "  ".join(f"{v*100:>{task_w}.2f}" for v in vals)
+        row += f"  {avg*100:>{task_w}.2f}"
+        print(row)
+
+    print(sep)
+    print(f"({metric} %, LoRA fine-tuning, GB/NT use train->val for selection then test; GUE/GUE+ report dev)")
 
 
 base.ModelSpec = HyenaModelSpec
