@@ -6,10 +6,11 @@ H4: H2 adapted with a sequence and its reverse complement as the positive pair.
 H5: H2 adapted with two overlapping crops from the same genomic window.
 H6: H2 adapted with a center crop and a small local shift from the same window.
 
-All variants use symmetric InfoNCE. This is intentionally a full fine-tune
-analogue of the current HyenaDNA Step 2 implementation rather than a LoRA
-implementation; HyenaDNA does not share DNAGPT's attention-projection module
-structure.
+All variants use symmetric InfoNCE. By default this script preserves the
+original full-backbone HyenaDNA Step 3 update. Passing ``--train-mode lora``
+injects PEFT LoRA adapters into the conservative Hyena projection/MLP modules
+(``in_proj,out_proj,fc1,fc2``) and saves a merged checkpoint for Step 4
+compatibility.
 """
 
 from __future__ import annotations
@@ -111,32 +112,12 @@ def set_dropout(model: nn.Module, p: float) -> int:
         raise ValueError("--dropout must be in [0, 1).")
 
     n_modules = 0
-    for module in model.modules():
+    for name, module in model.named_modules():
+        if "lora_dropout" in name:
+            continue
         if isinstance(module, nn.Dropout):
             module.p = p
             n_modules += 1
-
-    seen_config_ids: set[int] = set()
-    configs = (getattr(model, "config", None), getattr(getattr(model, "base_model", None), "config", None))
-    for cfg in configs:
-        if cfg is None:
-            continue
-        if id(cfg) in seen_config_ids:
-            continue
-        seen_config_ids.add(id(cfg))
-        for attr in (
-            "dropout",
-            "embed_dropout",
-            "hyena_dropout",
-            "hyena_filter_dropout",
-            "hidden_dropout_prob",
-            "attention_probs_dropout_prob",
-            "resid_pdrop",
-            "embd_pdrop",
-            "summary_first_dropout",
-        ):
-            if hasattr(cfg, attr):
-                setattr(cfg, attr, p)
 
     return n_modules
 
@@ -358,7 +339,8 @@ class HyenaDNAForCropContrastive(nn.Module):
         # CausalLM. Calling the LM wrapper with output_hidden_states=False returns
         # logits only, while output_hidden_states=True keeps every layer output in
         # memory. The backbone path returns just the final hidden state.
-        encoder = self.base_model.hyena if hasattr(self.base_model, "hyena") else self.base_model
+        base = _peft_base_model(self.base_model)
+        encoder = base.hyena if hasattr(base, "hyena") else base
         out = encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -405,9 +387,42 @@ class HyenaDNAForCropContrastive(nn.Module):
 
     def save_pretrained(self, save_dir: str):
         os.makedirs(save_dir, exist_ok=True)
-        save_hyena_checkpoint(self.base_model, None, save_dir)
+        model_to_save = self.base_model
+        if hasattr(model_to_save, "merge_and_unload"):
+            print("  Saving merged LoRA checkpoint")
+            model_to_save = model_to_save.merge_and_unload()
+        save_hyena_checkpoint(_peft_base_model(model_to_save), None, save_dir)
         if self.proj is not None:
             torch.save(self.proj.state_dict(), os.path.join(save_dir, "contrastive_head.pt"))
+
+
+def _peft_base_model(model):
+    if hasattr(model, "base_model") and hasattr(model.base_model, "model"):
+        return model.base_model.model
+    return model
+
+
+def build_hyena_lora_config(args):
+    from peft import LoraConfig
+
+    targets = [item.strip() for item in args.lora_target_modules.split(",") if item.strip()]
+    if not targets:
+        raise ValueError("--lora-target-modules must contain at least one module name.")
+    return LoraConfig(
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        target_modules=targets,
+        lora_dropout=args.lora_dropout,
+        bias="none",
+    )
+
+
+def apply_hyena_lora(base_model, args):
+    from peft import get_peft_model
+
+    peft_model = get_peft_model(base_model, build_hyena_lora_config(args))
+    peft_model.print_trainable_parameters()
+    return peft_model
 
 
 class HyenaContrastiveTrainer(Trainer):
@@ -560,6 +575,16 @@ def parse_args():
     p.add_argument("--temperature", type=float, default=0.05)
     p.add_argument("--proj-dim", type=int, default=256)
 
+    p.add_argument("--train-mode", choices=("full", "lora"), default="full")
+    p.add_argument("--lora-r", type=int, default=8)
+    p.add_argument("--lora-alpha", type=int, default=16)
+    p.add_argument("--lora-dropout", type=float, default=0.1)
+    p.add_argument(
+        "--lora-target-modules",
+        default="in_proj,out_proj,fc1,fc2",
+        help="Comma-separated HyenaDNA module-name suffixes for LoRA.",
+    )
+
     p.add_argument("--epochs", type=float, default=1.0)
     p.add_argument("--max-steps", type=int, default=1000)
     p.add_argument("--batch-size", type=int, default=16)
@@ -653,6 +678,8 @@ def main():
             "local_shift": "./hyena_h6_local_shift_contrastive",
         }
         args.output = default_outputs[args.mode]
+        if args.train_mode == "lora":
+            args.output = f"{args.output}_lora"
     set_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -668,6 +695,7 @@ def main():
     print("=" * 72)
     print(f"  Input model              : {args.model}")
     print(f"  Output                   : {args.output}")
+    print(f"  Train mode               : {args.train_mode}")
     print(f"  Device                   : {device}")
     print(f"  Precision                : {dtype}")
     objective_names = {
@@ -714,6 +742,11 @@ def main():
     if hasattr(base_model, "gradient_checkpointing_enable") and args.gradient_checkpointing:
         base_model.gradient_checkpointing_enable()
         print("  Gradient checkpointing   : enabled")
+
+    if args.train_mode == "lora":
+        print(f"  LoRA targets             : {args.lora_target_modules}")
+        print(f"  LoRA r/alpha/dropout     : {args.lora_r}/{args.lora_alpha}/{args.lora_dropout}")
+        base_model = apply_hyena_lora(base_model, args)
 
     model = HyenaDNAForCropContrastive(
         base_model=base_model,
@@ -785,9 +818,16 @@ def main():
     }
     stage = stages[args.mode]
     print(f"\n[3/4] Saving {stage} checkpoint")
-    model.base_model.config.hyena_training_stage = stage
-    if hasattr(model.base_model.config, "save_pretrained"):
-        model.base_model.config.save_pretrained(args.output)
+    config_model = _peft_base_model(model.base_model)
+    config_model.config.hyena_training_stage = stage
+    if args.train_mode == "lora":
+        config_model.config.hyena_train_mode = "lora"
+        config_model.config.hyena_lora_target_modules = args.lora_target_modules
+        config_model.config.hyena_lora_r = args.lora_r
+        config_model.config.hyena_lora_alpha = args.lora_alpha
+        config_model.config.hyena_lora_dropout = args.lora_dropout
+    if hasattr(config_model.config, "save_pretrained"):
+        config_model.config.save_pretrained(args.output)
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
