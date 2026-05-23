@@ -109,6 +109,22 @@ class EvoLoRAClassifier(nn.Module):
         return self.classifier(pooled)
 
 
+def _adapter_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    return {
+        k: v.detach().cpu()
+        for k, v in model.state_dict().items()
+        if "lora_" in k or "modules_to_save" in k
+    }
+
+
+def _restore_adapter_state(model: nn.Module, state: dict[str, torch.Tensor]) -> None:
+    if not state:
+        return
+    current = model.state_dict()
+    current.update(state)
+    model.load_state_dict(current, strict=False)
+
+
 def load_base_model(spec: EvoModelSpec, device: str, dtype):
     path = os.path.abspath(spec.path) if os.path.exists(spec.path) else spec.path
     print(f"  Loading {spec.name}  ({path}, mode={spec.mode}, evo)")
@@ -215,7 +231,13 @@ def train_one_task(base_model, tokenizer, train_seqs, train_labels, test_seqs, t
         if improved:
             best_metric = monitor_val
             best_epoch = epoch + 1
-            best_state = {k: v.detach().cpu() for k, v in classifier.state_dict().items()}
+            best_state = {
+                "adapter": _adapter_state_dict(backbone),
+                "classifier": {
+                    k: v.detach().cpu()
+                    for k, v in classifier.classifier.state_dict().items()
+                },
+            }
             stale = 0
         else:
             stale += 1
@@ -225,7 +247,8 @@ def train_one_task(base_model, tokenizer, train_seqs, train_labels, test_seqs, t
             break
 
     if best_state is not None:
-        classifier.load_state_dict(best_state)
+        _restore_adapter_state(backbone, best_state.get("adapter", {}))
+        classifier.classifier.load_state_dict(best_state["classifier"])
     classifier.eval()
     preds, labels_out = [], []
     with torch.inference_mode():

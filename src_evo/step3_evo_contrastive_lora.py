@@ -112,19 +112,32 @@ class PairCollator:
             a, b = [], []
             max_shift = int(round(self.chunk_size * (1.0 - self.overlap_ratio)))
             for seq in seqs:
-                start_a = 0 if len(seq) <= self.chunk_size else random.randint(0, len(seq) - self.chunk_size)
-                shift = random.randint(0, max_shift) if max_shift > 0 else 0
-                start_b = min(max(0, start_a + shift), max(0, len(seq) - self.chunk_size))
+                if len(seq) <= self.chunk_size:
+                    a.append(seq[: self.chunk_size])
+                    b.append(seq[: self.chunk_size])
+                    continue
+                available_shift = min(max_shift, len(seq) - self.chunk_size)
+                if available_shift <= 0:
+                    a.append(seq[: self.chunk_size])
+                    b.append(seq[: self.chunk_size])
+                    continue
+                start_a = random.randint(0, available_shift)
+                start_b = random.randint(0, available_shift)
                 a.append(seq[start_a : start_a + self.chunk_size])
                 b.append(seq[start_b : start_b + self.chunk_size])
         elif self.mode == "local_shift":
             a, b = [], []
-            shift_max = max(1, int(round(self.chunk_size * self.local_shift_ratio)))
+            shift_max = int(round(self.chunk_size * self.local_shift_ratio))
+            anchor = shift_max
             for seq in seqs:
-                center = 0 if len(seq) <= self.chunk_size else random.randint(0, len(seq) - self.chunk_size)
+                required_len = self.chunk_size + 2 * shift_max
+                if shift_max <= 0 or len(seq) < required_len:
+                    a.append(seq[: self.chunk_size])
+                    b.append(seq[: self.chunk_size])
+                    continue
                 delta = random.randint(-shift_max, shift_max)
-                start_b = min(max(0, center + delta), max(0, len(seq) - self.chunk_size))
-                a.append(seq[center : center + self.chunk_size])
+                start_b = anchor + delta
+                a.append(seq[anchor : anchor + self.chunk_size])
                 b.append(seq[start_b : start_b + self.chunk_size])
         else:
             raise ValueError(self.mode)

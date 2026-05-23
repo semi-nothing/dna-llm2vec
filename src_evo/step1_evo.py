@@ -24,6 +24,7 @@ from common import (  # noqa: E402
     load_evo_tokenizer,
     make_evo_bidirectional,
     save_evo_checkpoint,
+    verify_evo_bidirectional,
 )
 
 
@@ -31,6 +32,9 @@ def parse_args():
     p = argparse.ArgumentParser(description="Evo Step 1: bidirectional patch")
     p.add_argument("--model", default=DEFAULT_EVO_MODEL)
     p.add_argument("--output", default="./evo_e1_bidir")
+    p.add_argument("--verify-max-length", type=int, default=128)
+    p.add_argument("--verify-atol", type=float, default=1e-6)
+    p.add_argument("--skip-verify", action="store_true")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--dtype", choices=("auto", "float32", "float16", "bfloat16"), default="auto")
     return p.parse_args()
@@ -64,6 +68,27 @@ def main():
     print(f"  Load path: {load_path}")
     print(f"  Params   : {count_parameters_m(model):.1f}M")
     print(f"  Patched  : {patched} modules with causal/bidirectional flags")
+    if not args.skip_verify:
+        report = verify_evo_bidirectional(
+            model,
+            tokenizer,
+            max_length=args.verify_max_length,
+            device=args.device,
+            atol=args.verify_atol,
+        )
+        print(
+            "  Verify   : "
+            f"passed={report['passed']}  "
+            f"prefix max diff={report['max_abs_prefix_diff']:.3e}  "
+            f"mean diff={report['mean_abs_prefix_diff']:.3e}  "
+            f"tokens={report['probe_tokens']}/{report['common_prefix_tokens']}/{report['valid_tokens']}"
+        )
+        if not report["passed"]:
+            raise RuntimeError(
+                "Evo bidirectional verification failed: changing future tokens "
+                "did not change prefix hidden states. The patch appears causal "
+                "or no-op; refusing to save E1."
+            )
     save_evo_checkpoint(model, tokenizer, args.output)
     print(f"  Saved    : {args.output}")
 

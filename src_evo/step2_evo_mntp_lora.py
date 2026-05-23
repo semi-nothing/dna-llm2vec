@@ -28,10 +28,10 @@ from common import (  # noqa: E402
     DEFAULT_EVO_MODEL,
     VALID_BASES_RE,
     count_trainable_parameters_m,
-    ensure_mask_token,
     infer_lora_target_modules,
     load_evo_causal_lm,
     load_evo_tokenizer,
+    resolve_mask_surrogate_id,
     save_evo_checkpoint,
 )
 
@@ -84,6 +84,7 @@ class EvoMaskingCollator:
     tokenizer: object
     max_length: int
     mlm_probability: float
+    mask_token_id: int
 
     def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
         seqs = [item["sequence"].upper() for item in features]
@@ -108,7 +109,7 @@ class EvoMaskingCollator:
         probability.masked_fill_(special, 0.0)
         masked = torch.bernoulli(probability).bool()
         labels[~masked] = -100
-        input_ids[masked] = int(self.tokenizer.mask_token_id)
+        input_ids[masked] = int(self.mask_token_id)
         enc["input_ids"] = input_ids
         enc["labels"] = labels
         return enc
@@ -198,6 +199,8 @@ def parse_args():
     p.add_argument("--stride", type=int, default=4096)
     p.add_argument("--val-fraction", type=float, default=0.01)
     p.add_argument("--mlm-probability", type=float, default=0.15)
+    p.add_argument("--mask-token", default="_", help="Existing single Evo token used as the MNTP mask surrogate.")
+    p.add_argument("--mask-token-id", type=int, default=95, help="Expected id for --mask-token; set to -1 to disable the check.")
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--eval-batch-size", type=int, default=None)
     p.add_argument("--grad-accum", type=int, default=8)
@@ -252,14 +255,16 @@ def main():
 
     tokenizer = load_evo_tokenizer(args.model)
     model, _ = load_evo_causal_lm(args.model, device=device, dtype=dtype)
-    ensure_mask_token(tokenizer, model)
+    expected_mask_id = None if args.mask_token_id < 0 else args.mask_token_id
+    mask_token_id = resolve_mask_surrogate_id(tokenizer, args.mask_token, expected_mask_id)
+    print(f"  Mask surrogate           : {args.mask_token!r} -> id {mask_token_id}")
     if tokenizer.pad_token_id is not None:
         model.config.pad_token_id = tokenizer.pad_token_id
     wrapper = EvoForMNTPLoRA(model, build_lora_config(model, args)).to(device=device)
     print(f"  Trainable parameters     : {count_trainable_parameters_m(wrapper):.2f}M")
 
     train_ds, val_ds = load_data(args)
-    collator = EvoMaskingCollator(tokenizer, args.max_length, args.mlm_probability)
+    collator = EvoMaskingCollator(tokenizer, args.max_length, args.mlm_probability, mask_token_id)
     eval_strategy = "no" if args.no_eval else "steps"
     kwargs = dict(
         output_dir=os.path.join(args.output, "trainer_state"),

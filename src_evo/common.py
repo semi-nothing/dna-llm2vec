@@ -134,13 +134,33 @@ def peft_base_model(model):
     return model
 
 
-def ensure_mask_token(tokenizer, model=None) -> str:
-    if getattr(tokenizer, "mask_token", None) is not None:
-        return tokenizer.mask_token
-    tokenizer.add_special_tokens({"mask_token": "[MASK]"})
-    if model is not None and hasattr(model, "resize_token_embeddings"):
-        model.resize_token_embeddings(len(tokenizer))
-    return tokenizer.mask_token
+def resolve_mask_surrogate_id(tokenizer, token: str = "_", expected_id: int | None = 95) -> int:
+    """
+    Resolve a non-special token to use as the MNTP mask surrogate.
+
+    Evo's tokenizer only defines a pad token by default. We avoid adding a new
+    special token because that would resize the 7B embedding table and make the
+    checkpoint format less reproducible. Following the LLM2Vec-style surrogate
+    convention, "_" is used by default and must already be a single tokenizer
+    token distinct from padding.
+    """
+    ids = tokenizer.encode(token, add_special_tokens=False)
+    if len(ids) != 1:
+        raise ValueError(
+            f"--mask-token {token!r} must encode to exactly one Evo token; got {ids}."
+        )
+    mask_id = int(ids[0])
+    if tokenizer.pad_token_id is not None and mask_id == int(tokenizer.pad_token_id):
+        raise ValueError(
+            f"--mask-token {token!r} resolves to the pad token id {mask_id}; "
+            "mask and padding must remain distinct."
+        )
+    if expected_id is not None and mask_id != int(expected_id):
+        raise ValueError(
+            f"--mask-token {token!r} resolved to id {mask_id}, expected {expected_id}. "
+            "Pass --mask-token-id with the observed id if this tokenizer revision is intended."
+        )
+    return mask_id
 
 
 def ensure_attention_mask(enc: dict[str, torch.Tensor], pad_token_id: int | None) -> torch.Tensor:
@@ -220,11 +240,24 @@ def evo_backbone_hidden(model, input_ids: torch.Tensor, attention_mask: torch.Te
 
 def evo_hidden_states(model, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
     try:
-        out = model(input_ids=input_ids, use_cache=False, output_hidden_states=True)
+        out = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
+            output_hidden_states=True,
+        )
         return extract_hidden_states(out)
     except TypeError as e:
         msg = str(e)
-        if "output_hidden_states" not in msg and "use_cache" not in msg:
+        if "attention_mask" in msg:
+            try:
+                out = model(input_ids=input_ids, use_cache=False, output_hidden_states=True)
+                return extract_hidden_states(out)
+            except TypeError as inner:
+                msg = str(inner)
+                if "output_hidden_states" not in msg and "use_cache" not in msg:
+                    raise
+        elif "output_hidden_states" not in msg and "use_cache" not in msg:
             raise
     hidden = evo_backbone_hidden(model, input_ids, attention_mask)
     if hidden is None:
@@ -319,6 +352,12 @@ def make_evo_bidirectional(model):
         if changed:
             patched += 1
     model._evo_bidirectional_modules_patched = patched
+    if patched == 0:
+        raise RuntimeError(
+            "Evo bidirectional patch did not find any causal/bidirectional "
+            "control attributes to modify. Refusing to mark the checkpoint as "
+            "bidirectional because this would make E1 a no-op."
+        )
     return model
 
 
@@ -329,3 +368,68 @@ def maybe_activate_evo_bidirectional(model):
     if bool(getattr(cfg, "evo_bidirectional_patch", False) or getattr(cfg, "bidirectional", False)):
         return make_evo_bidirectional(model)
     return model
+
+
+def verify_evo_bidirectional(
+    model,
+    tokenizer,
+    max_length: int = 128,
+    device: str | None = None,
+    atol: float = 1e-6,
+) -> dict[str, float | bool | int]:
+    """
+    Check whether a future-token perturbation changes prefix hidden states.
+
+    A strictly causal decoder should produce identical hidden states for prefix
+    positions when only a suffix token is changed. A genuinely bidirectional
+    encoder-like patch should let that suffix perturbation propagate backward.
+    """
+    if device is None:
+        device = next(model.parameters()).device.type
+    model.eval()
+
+    prefix_bp = max(32, max_length // 2)
+    suffix_bp = max(16, max_length // 4)
+    seq_a = ("ACGT" * ((prefix_bp // 4) + 1))[:prefix_bp] + ("A" * suffix_bp)
+    seq_b = ("ACGT" * ((prefix_bp // 4) + 1))[:prefix_bp] + ("T" * suffix_bp)
+    enc = tokenizer(
+        [seq_a, seq_b],
+        truncation=True,
+        max_length=max_length,
+        padding="longest",
+        return_tensors="pt",
+    )
+    enc = {k: v.to(device) for k, v in enc.items()}
+    input_ids = enc["input_ids"]
+    attention_mask = ensure_attention_mask(enc, tokenizer.pad_token_id)
+    same_prefix = input_ids[0].eq(input_ids[1])
+    common_prefix = 0
+    for is_same in same_prefix.tolist():
+        if not is_same:
+            break
+        common_prefix += 1
+    if common_prefix < 2:
+        raise RuntimeError(
+            "Evo bidirectional verification is inconclusive because the two "
+            "probe sequences do not share a tokenized prefix. Try a larger "
+            "--verify-max-length or inspect the Evo tokenizer."
+        )
+
+    with torch.inference_mode():
+        hidden = evo_hidden_states(model, input_ids, attention_mask).float()
+
+    valid_len = int(attention_mask[0].sum().item())
+    probe_len = max(1, min(common_prefix, valid_len // 2, hidden.size(1) // 2))
+    diff = (hidden[0, :probe_len] - hidden[1, :probe_len]).abs()
+    max_abs = float(diff.max().item())
+    mean_abs = float(diff.mean().item())
+    passed = bool(max_abs > atol)
+    return {
+        "passed": passed,
+        "max_abs_prefix_diff": max_abs,
+        "mean_abs_prefix_diff": mean_abs,
+        "probe_tokens": int(probe_len),
+        "common_prefix_tokens": int(common_prefix),
+        "valid_tokens": int(valid_len),
+        "threshold": float(atol),
+    }
