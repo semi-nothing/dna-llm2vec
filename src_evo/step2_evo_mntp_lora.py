@@ -85,6 +85,8 @@ class EvoMaskingCollator:
     max_length: int
     mlm_probability: float
     mask_token_id: int
+    replacement_policy: str
+    random_token_ids: torch.Tensor
 
     def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
         seqs = [item["sequence"].upper() for item in features]
@@ -109,10 +111,47 @@ class EvoMaskingCollator:
         probability.masked_fill_(special, 0.0)
         masked = torch.bernoulli(probability).bool()
         labels[~masked] = -100
-        input_ids[masked] = int(self.mask_token_id)
+        idx = masked.nonzero(as_tuple=True)
+        if idx[0].numel() > 0:
+            if self.replacement_policy == "all_mask":
+                input_ids[idx] = int(self.mask_token_id)
+            elif self.replacement_policy == "bert":
+                probs = torch.rand(idx[0].numel(), device=input_ids.device)
+                mask_positions = probs < 0.8
+                random_positions = (probs >= 0.8) & (probs < 0.9)
+                if mask_positions.any():
+                    input_ids[idx[0][mask_positions], idx[1][mask_positions]] = int(self.mask_token_id)
+                if random_positions.any():
+                    n_random = int(random_positions.sum().item())
+                    rand_idx = torch.randint(
+                        0,
+                        self.random_token_ids.numel(),
+                        (n_random,),
+                        device=input_ids.device,
+                    )
+                    random_ids = self.random_token_ids.to(input_ids.device)
+                    input_ids[idx[0][random_positions], idx[1][random_positions]] = random_ids[rand_idx]
+            else:
+                raise ValueError(f"Unsupported replacement_policy={self.replacement_policy!r}")
         enc["input_ids"] = input_ids
         enc["labels"] = labels
         return enc
+
+
+def resolve_random_base_token_ids(tokenizer) -> torch.Tensor:
+    ids = []
+    unk_id = getattr(tokenizer, "unk_token_id", None)
+    for base in ("A", "C", "G", "T"):
+        token_ids = tokenizer.encode(base, add_special_tokens=False)
+        if len(token_ids) != 1:
+            raise ValueError(f"Random replacement base {base!r} must encode to one token; got {token_ids}.")
+        token_id = int(token_ids[0])
+        if unk_id is not None and token_id == int(unk_id):
+            raise ValueError(f"Random replacement base {base!r} resolved to unk token id {token_id}.")
+        ids.append(token_id)
+    if len(set(ids)) != 4:
+        raise ValueError(f"Random replacement A/C/G/T ids must be distinct; got {ids}.")
+    return torch.tensor(ids, dtype=torch.long)
 
 
 def build_lora_config(model, args):
@@ -201,6 +240,7 @@ def parse_args():
     p.add_argument("--mlm-probability", type=float, default=0.15)
     p.add_argument("--mask-token", default="_", help="Existing single Evo token used as the MNTP mask surrogate.")
     p.add_argument("--mask-token-id", type=int, default=95, help="Expected id for --mask-token; set to -1 to disable the check.")
+    p.add_argument("--replacement-policy", choices=("bert", "all_mask"), default="bert")
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--eval-batch-size", type=int, default=None)
     p.add_argument("--grad-accum", type=int, default=8)
@@ -258,13 +298,23 @@ def main():
     expected_mask_id = None if args.mask_token_id < 0 else args.mask_token_id
     mask_token_id = resolve_mask_surrogate_id(tokenizer, args.mask_token, expected_mask_id)
     print(f"  Mask surrogate           : {args.mask_token!r} -> id {mask_token_id}")
+    random_token_ids = resolve_random_base_token_ids(tokenizer)
+    print(f"  Replacement policy       : {args.replacement_policy}")
+    print(f"  Random replacement ids   : {random_token_ids.tolist()}")
     if tokenizer.pad_token_id is not None:
         model.config.pad_token_id = tokenizer.pad_token_id
     wrapper = EvoForMNTPLoRA(model, build_lora_config(model, args)).to(device=device)
     print(f"  Trainable parameters     : {count_trainable_parameters_m(wrapper):.2f}M")
 
     train_ds, val_ds = load_data(args)
-    collator = EvoMaskingCollator(tokenizer, args.max_length, args.mlm_probability, mask_token_id)
+    collator = EvoMaskingCollator(
+        tokenizer,
+        args.max_length,
+        args.mlm_probability,
+        mask_token_id,
+        args.replacement_policy,
+        random_token_ids,
+    )
     eval_strategy = "no" if args.no_eval else "steps"
     kwargs = dict(
         output_dir=os.path.join(args.output, "trainer_state"),
