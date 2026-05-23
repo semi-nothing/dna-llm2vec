@@ -53,11 +53,26 @@ def set_existing_byte_pad_token(tokenizer) -> None:
 
 def load_evo_tokenizer(model_name_or_path: str):
     path = resolve_path(model_name_or_path)
-    tokenizer = AutoTokenizer.from_pretrained(
-        path,
-        trust_remote_code=True,
-        revision=DEFAULT_EVO_REVISION,
-    )
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            path,
+            trust_remote_code=True,
+            revision=DEFAULT_EVO_REVISION,
+        )
+    except ValueError as e:
+        message = str(e)
+        if "ByteTokenizer" not in message or not os.path.isdir(path):
+            raise
+        fallback = os.environ.get("EVO_TOKENIZER_SOURCE", DEFAULT_EVO_MODEL)
+        print(
+            "[evo] local checkpoint tokenizer could not import ByteTokenizer; "
+            f"falling back to tokenizer from {fallback!r}."
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            fallback,
+            trust_remote_code=True,
+            revision=DEFAULT_EVO_REVISION,
+        )
     set_existing_byte_pad_token(tokenizer)
     return tokenizer
 
