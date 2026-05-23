@@ -33,7 +33,7 @@ def parse_args():
     p.add_argument("--model", default=DEFAULT_EVO_MODEL)
     p.add_argument("--output", default="./evo_e1_bidir")
     p.add_argument("--verify-max-length", type=int, default=128)
-    p.add_argument("--verify-atol", type=float, default=1e-6)
+    p.add_argument("--verify-atol", type=float, default=None)
     p.add_argument("--skip-verify", action="store_true")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--dtype", choices=("auto", "float32", "float16", "bfloat16"), default="auto")
@@ -81,6 +81,8 @@ def main():
             f"passed={report['passed']}  "
             f"prefix max diff={report['max_abs_prefix_diff']:.3e}  "
             f"mean diff={report['mean_abs_prefix_diff']:.3e}  "
+            f"rel mean={report['relative_mean_prefix_diff']:.3e}  "
+            f"threshold={report['threshold']:.1e}  "
             f"tokens={report['probe_tokens']}/{report['common_prefix_tokens']}/{report['valid_tokens']}"
         )
         if not report["passed"]:

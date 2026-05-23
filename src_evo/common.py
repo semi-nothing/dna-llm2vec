@@ -381,7 +381,7 @@ def verify_evo_bidirectional(
     tokenizer,
     max_length: int = 128,
     device: str | None = None,
-    atol: float = 1e-6,
+    atol: float | None = None,
 ) -> dict[str, float | bool | int]:
     """
     Check whether a future-token perturbation changes prefix hidden states.
@@ -426,16 +426,30 @@ def verify_evo_bidirectional(
 
     valid_len = int(attention_mask[0].sum().item())
     probe_len = max(1, min(common_prefix, valid_len // 2, hidden.size(1) // 2))
-    diff = (hidden[0, :probe_len] - hidden[1, :probe_len]).abs()
+    prefix_a = hidden[0, :probe_len]
+    prefix_b = hidden[1, :probe_len]
+    diff = (prefix_a - prefix_b).abs()
     max_abs = float(diff.max().item())
     mean_abs = float(diff.mean().item())
-    passed = bool(max_abs > atol)
+    model_dtype = next(model.parameters()).dtype
+    if atol is None:
+        atol = {
+            torch.bfloat16: 1e-3,
+            torch.float16: 1e-3,
+            torch.float32: 1e-6,
+            torch.float64: 1e-8,
+        }.get(model_dtype, 1e-6)
+    denom = float(prefix_a.abs().mean().clamp_min(1e-12).item())
+    relative_mean = float(mean_abs / denom)
+    passed = bool(max_abs > atol and relative_mean > 1e-5)
     return {
         "passed": passed,
         "max_abs_prefix_diff": max_abs,
         "mean_abs_prefix_diff": mean_abs,
+        "relative_mean_prefix_diff": relative_mean,
         "probe_tokens": int(probe_len),
         "common_prefix_tokens": int(common_prefix),
         "valid_tokens": int(valid_len),
         "threshold": float(atol),
+        "relative_threshold": 1e-5,
     }
