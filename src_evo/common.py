@@ -246,13 +246,19 @@ def evo_hidden_states(model, input_ids: torch.Tensor, attention_mask: torch.Tens
             use_cache=False,
             output_hidden_states=True,
         )
-        return extract_hidden_states(out)
+        try:
+            return extract_hidden_states(out)
+        except TypeError:
+            pass
     except TypeError as e:
         msg = str(e)
         if "attention_mask" in msg:
             try:
                 out = model(input_ids=input_ids, use_cache=False, output_hidden_states=True)
-                return extract_hidden_states(out)
+                try:
+                    return extract_hidden_states(out)
+                except TypeError:
+                    pass
             except TypeError as inner:
                 msg = str(inner)
                 if "output_hidden_states" not in msg and "use_cache" not in msg:
