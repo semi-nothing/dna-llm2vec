@@ -192,9 +192,12 @@ def write_outputs(records: list[dict[str, Any]], sample_std: bool, out_prefix: P
     for record in records:
         by_model.setdefault(record["model"], []).append(record)
 
-    baseline_mean = None
-    if "M0" in by_model:
-        baseline_mean = mean(record["value"] for record in by_model["M0"])
+    baseline_model = None
+    for candidate in ("M0", "H0"):
+        if candidate in by_model:
+            baseline_model = candidate
+            break
+    baseline_mean = None if baseline_model is None else mean(record["value"] for record in by_model[baseline_model])
 
     summary: list[dict[str, Any]] = []
     for model in sorted(by_model, key=model_sort_key):
@@ -212,7 +215,7 @@ def write_outputs(records: list[dict[str, Any]], sample_std: bool, out_prefix: P
                 "n_fragments": len(values),
                 "mean": avg,
                 "std": std,
-                "delta_vs_M0": "" if baseline_mean is None else avg - baseline_mean,
+                "delta_vs_baseline": "" if baseline_mean is None else avg - baseline_mean,
                 "mean_aligned_positions": "" if not n_positions else mean(n_positions),
             }
         )
@@ -243,7 +246,7 @@ def write_outputs(records: list[dict[str, Any]], sample_std: bool, out_prefix: P
     with out_csv.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["model", "n_fragments", "mean", "std", "delta_vs_M0", "mean_aligned_positions"],
+            fieldnames=["model", "n_fragments", "mean", "std", "delta_vs_baseline", "mean_aligned_positions"],
         )
         writer.writeheader()
         writer.writerows(summary)
@@ -251,10 +254,11 @@ def write_outputs(records: list[dict[str, Any]], sample_std: bool, out_prefix: P
     with out_md.open("w", encoding="utf-8") as handle:
         handle.write("# RC-Consistency Summary\n\n")
         handle.write(f"Metric: `{metric}` from `*_rc_compare.npz`\n\n")
-        handle.write("| Model | fragments | mean +/- std | Delta vs M0 | mean aligned positions |\n")
+        baseline_label = baseline_model or "baseline"
+        handle.write(f"| Model | fragments | mean +/- std | Delta vs {baseline_label} | mean aligned positions |\n")
         handle.write("|---|---:|---:|---:|---:|\n")
         for row in summary:
-            delta = "" if row["delta_vs_M0"] == "" else fmt(float(row["delta_vs_M0"]))
+            delta = "" if row["delta_vs_baseline"] == "" else fmt(float(row["delta_vs_baseline"]))
             mean_pos = "" if row["mean_aligned_positions"] == "" else fmt(float(row["mean_aligned_positions"]))
             handle.write(
                 f"| {row['model']} | {row['n_fragments']} | "
