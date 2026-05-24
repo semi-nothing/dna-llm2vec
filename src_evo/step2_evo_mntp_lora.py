@@ -254,6 +254,14 @@ def parse_args():
     p.add_argument("--logging-steps", type=int, default=20)
     p.add_argument("--no-eval", action="store_true")
     p.add_argument("--gradient-checkpointing", action="store_true")
+    p.add_argument(
+        "--fsdp",
+        default=None,
+        help='Optional HF Trainer FSDP mode, e.g. "full_shard auto_wrap". Use with torchrun for multi-GPU sharding.',
+    )
+    p.add_argument("--fsdp-min-num-params", type=int, default=10_000_000)
+    p.add_argument("--fsdp-activation-checkpointing", action="store_true")
+    p.add_argument("--fsdp-cpu-offload", action="store_true")
     p.add_argument("--dataloader-num-workers", type=int, default=0)
     p.add_argument("--no-pin-memory", action="store_true")
     p.add_argument("--lora-r", type=int, default=16)
@@ -290,7 +298,12 @@ def main():
     args = parse_args()
     set_seed(args.seed)
     random.seed(args.seed)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_fsdp = bool(args.fsdp)
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if torch.cuda.is_available() and not use_fsdp:
+        device = f"cuda:{local_rank}"
+    else:
+        device = "cpu"
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
 
     tokenizer = load_evo_tokenizer(args.model)
@@ -303,7 +316,9 @@ def main():
     print(f"  Random replacement ids   : {random_token_ids.tolist()}")
     if tokenizer.pad_token_id is not None:
         model.config.pad_token_id = tokenizer.pad_token_id
-    wrapper = EvoForMNTPLoRA(model, build_lora_config(model, args)).to(device=device)
+    wrapper = EvoForMNTPLoRA(model, build_lora_config(model, args))
+    if not use_fsdp:
+        wrapper = wrapper.to(device=device)
     print(f"  Trainable parameters     : {count_trainable_parameters_m(wrapper):.2f}M")
 
     train_ds, val_ds = load_data(args)
@@ -341,6 +356,20 @@ def main():
         run_name=args.run_name,
         seed=args.seed,
     )
+    if args.fsdp:
+        fsdp_mode = args.fsdp
+        if args.fsdp_cpu_offload and "offload" not in fsdp_mode.split():
+            fsdp_mode = f"{fsdp_mode} offload"
+        kwargs["fsdp"] = fsdp_mode
+        fsdp_config = {
+            "min_num_params": args.fsdp_min_num_params,
+            "use_orig_params": True,
+            "limit_all_gathers": True,
+        }
+        if args.fsdp_activation_checkpointing or args.gradient_checkpointing:
+            fsdp_config["activation_checkpointing"] = True
+            kwargs["gradient_checkpointing"] = False
+        kwargs["fsdp_config"] = fsdp_config
     if "eval_strategy" in inspect.signature(TrainingArguments.__init__).parameters:
         kwargs["eval_strategy"] = eval_strategy
     else:
