@@ -317,8 +317,10 @@ def main():
     if tokenizer.pad_token_id is not None:
         model.config.pad_token_id = tokenizer.pad_token_id
     wrapper = EvoForMNTPLoRA(model, build_lora_config(model, args))
-    if not use_fsdp:
-        wrapper = wrapper.to(device=device)
+    if use_fsdp:
+        wrapper = wrapper.to(dtype=dtype)
+    else:
+        wrapper = wrapper.to(device=device, dtype=dtype)
     print(f"  Trainable parameters     : {count_trainable_parameters_m(wrapper):.2f}M")
 
     train_ds, val_ds = load_data(args)
