@@ -118,6 +118,18 @@ def _infer_hidden_dim(model) -> int:
     raise RuntimeError("Could not infer HyenaDNA hidden dimension.")
 
 
+def promote_trainable_parameters_to_fp32(model: nn.Module) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for param in model.parameters():
+        if not param.requires_grad:
+            continue
+        dtype_name = str(param.dtype).replace("torch.", "")
+        counts[dtype_name] = counts.get(dtype_name, 0) + param.numel()
+        if param.is_floating_point() and param.dtype != torch.float32:
+            param.data = param.data.float()
+    return counts
+
+
 class HyenaDNALoRAClassifier(nn.Module):
     """Mean-pool Hyena hidden states from a PEFT-wrapped backbone."""
 
@@ -137,6 +149,7 @@ class HyenaDNALoRAClassifier(nn.Module):
         )
         hidden = extract_hidden_states(out)
         pooled = mean_pool_embeddings(hidden, attention_mask)
+        pooled = pooled.to(dtype=self.classifier.weight.dtype)
         return self.classifier(pooled)
 
 
@@ -224,6 +237,12 @@ def train_one_task(
     hidden_dim = _infer_hidden_dim(backbone)
     dtype = next(backbone.parameters()).dtype
     classifier = HyenaDNALoRAClassifier(backbone, n_cls, hidden_dim).to(device=device, dtype=dtype)
+    if args.trainable_fp32:
+        before_counts = promote_trainable_parameters_to_fp32(classifier)
+        print(
+            "    promoted trainable params to fp32 "
+            f"(before: {', '.join(f'{k}={v/1e6:.2f}M' for k, v in sorted(before_counts.items()))})"
+        )
 
     trainable = [p for p in classifier.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
@@ -401,6 +420,13 @@ def parse_args():
     p.add_argument("--warmup-steps", type=int, default=50)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--grad-ckpt", action="store_true")
+    p.add_argument(
+        "--no-trainable-fp32",
+        dest="trainable_fp32",
+        action="store_false",
+        help="Keep LoRA adapters and classifier head in the backbone dtype instead of promoting them to fp32.",
+    )
+    p.set_defaults(trainable_fp32=True)
     p.add_argument("--patience", type=int, default=0)
     p.add_argument("--monitor", choices=("f1", "mcc", "accuracy"), default="mcc")
     p.add_argument("--min-delta", type=float, default=0.0)

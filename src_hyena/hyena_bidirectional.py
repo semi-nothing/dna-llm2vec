@@ -143,6 +143,14 @@ def _hyena_operator_forward_bidirectional(self, u):
     return y
 
 
+def _is_forward_bound_to(module, fn) -> bool:
+    forward = getattr(module, "forward", None)
+    return (
+        getattr(forward, "__self__", None) is module
+        and getattr(forward, "__func__", None) is fn
+    )
+
+
 def make_hyenadna_bidirectional(model):
     """
     Convert a pretrained causal HyenaDNA checkpoint into an H1-style
@@ -169,7 +177,10 @@ def make_hyenadna_bidirectional(model):
             setattr(module, "bidirectional", True)
             modules_with_bidir_true += 1
 
-            if not getattr(module, "_hyena_bidirectional_forward_patched", False):
+            if (
+                not getattr(module, "_hyena_bidirectional_forward_patched", False)
+                or not _is_forward_bound_to(module, _hyena_filter_forward_bidirectional)
+            ):
                 module._hyena_original_forward = module.forward
                 module.forward = types.MethodType(_hyena_filter_forward_bidirectional, module)
                 module._hyena_bidirectional_forward_patched = True
@@ -178,7 +189,10 @@ def make_hyenadna_bidirectional(model):
 
         if _is_hyena_operator_module(module):
             total_operators += 1
-            if not getattr(module, "_hyena_bidirectional_operator_forward_patched", False):
+            if (
+                not getattr(module, "_hyena_bidirectional_operator_forward_patched", False)
+                or not _is_forward_bound_to(module, _hyena_operator_forward_bidirectional)
+            ):
                 module._hyena_operator_original_forward = module.forward
                 module.forward = types.MethodType(_hyena_operator_forward_bidirectional, module)
                 module._hyena_bidirectional_operator_forward_patched = True
@@ -239,7 +253,10 @@ def inspect_hyenadna_bidirectional(model) -> HyenaBidirectionalReport:
             modules_with_bidir_attr += 1
         if getattr(module, "bidirectional", False):
             modules_with_bidir_true += 1
-        if getattr(module, "_hyena_bidirectional_forward_patched", False):
+        if (
+            getattr(module, "_hyena_bidirectional_forward_patched", False)
+            and _is_forward_bound_to(module, _hyena_filter_forward_bidirectional)
+        ):
             modules_forward_patched += 1
 
     return HyenaBidirectionalReport(

@@ -350,6 +350,7 @@ class HyenaDNAForCropContrastive(nn.Module):
         hidden = extract_hidden_states(out)
         pooled = self._mean_pool(hidden, attention_mask)
         if self.proj is not None:
+            pooled = pooled.to(dtype=next(self.proj.parameters()).dtype)
             pooled = self.proj(pooled)
         return F.normalize(pooled, dim=-1)
 
@@ -400,6 +401,18 @@ def _peft_base_model(model):
     if hasattr(model, "base_model") and hasattr(model.base_model, "model"):
         return model.base_model.model
     return model
+
+
+def promote_trainable_parameters_to_fp32(model: nn.Module) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for param in model.parameters():
+        if not param.requires_grad:
+            continue
+        dtype_name = str(param.dtype).replace("torch.", "")
+        counts[dtype_name] = counts.get(dtype_name, 0) + param.numel()
+        if param.is_floating_point() and param.dtype != torch.float32:
+            param.data = param.data.float()
+    return counts
 
 
 def build_hyena_lora_config(args):
@@ -594,6 +607,13 @@ def parse_args():
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--warmup-steps", type=int, default=100)
     p.add_argument("--gradient-checkpointing", action="store_true")
+    p.add_argument(
+        "--no-trainable-fp32",
+        dest="trainable_fp32",
+        action="store_false",
+        help="Keep LoRA adapters and projection head in the backbone dtype instead of promoting them to fp32.",
+    )
+    p.set_defaults(trainable_fp32=True)
 
     p.add_argument("--logging-steps", type=int, default=20)
     p.add_argument("--save-steps", type=int, default=200)
@@ -753,6 +773,12 @@ def main():
         proj_dim=args.proj_dim,
         temperature=args.temperature,
     ).to(device=device, dtype=dtype)
+    if args.train_mode == "lora" and args.trainable_fp32:
+        before_counts = promote_trainable_parameters_to_fp32(model)
+        print(
+            "  Trainable fp32           : promoted "
+            f"(before: {', '.join(f'{k}={v/1e6:.2f}M' for k, v in sorted(before_counts.items()))})"
+        )
     if args.mode == "dropout":
         n_dropout = set_dropout(model, args.dropout)
         print(f"  Dropout modules patched  : {n_dropout}")

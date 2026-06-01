@@ -174,6 +174,18 @@ def restrict_embedding_grad_to_mask_row(model, mask_token_id: int) -> None:
     print("  Mask embedding policy    : train [MASK] row only")
 
 
+def promote_trainable_parameters_to_fp32(model: nn.Module) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for param in model.parameters():
+        if not param.requires_grad:
+            continue
+        dtype_name = str(param.dtype).replace("torch.", "")
+        counts[dtype_name] = counts.get(dtype_name, 0) + param.numel()
+        if param.is_floating_point() and param.dtype != torch.float32:
+            param.data = param.data.float()
+    return counts
+
+
 class HyenaTrainer(Trainer):
     """
     Trainer variant that avoids the default shared-tensor safetensors path.
@@ -456,6 +468,13 @@ def parse_args():
         default=True,
         help="Train only the [MASK] embedding row alongside LoRA adapters.",
     )
+    p.add_argument(
+        "--no-trainable-fp32",
+        dest="trainable_fp32",
+        action="store_false",
+        help="Keep LoRA adapters and other trainable parameters in the backbone dtype instead of promoting them to fp32.",
+    )
+    p.set_defaults(trainable_fp32=True)
     p.add_argument("--epochs", type=float, default=1.0)
     p.add_argument("--max-steps", type=int, default=-1)
     p.add_argument("--batch-size", type=int, default=16)
@@ -536,6 +555,12 @@ def main():
         base_model = apply_hyena_lora(base_model, args)
 
     wrapper = HyenaDNAForMaskedAdaptation(base_model)
+    if args.train_mode == "lora" and args.trainable_fp32:
+        before_counts = promote_trainable_parameters_to_fp32(wrapper)
+        print(
+            "  Trainable fp32           : promoted "
+            f"(before: {', '.join(f'{k}={v/1e6:.2f}M' for k, v in sorted(before_counts.items()))})"
+        )
 
     if args.fasta:
         print("\n[1/4] Loading FASTA dataset")
