@@ -170,6 +170,24 @@ def build_lora_config(model, args):
     )
 
 
+def _evo_recurrent_params_cls(module):
+    owner_module = sys.modules.get(module.__class__.__module__)
+    recurrent_cls = getattr(owner_module, "RecurrentInferenceParams", None)
+    if recurrent_cls is None:
+        raise RuntimeError(
+            f"Could not find RecurrentInferenceParams for {module.__class__.__module__}; "
+            "cannot disable Evo parallel Hyena paths safely."
+        )
+    return recurrent_cls
+
+
+def _new_evo_recurrent_params(module, recurrent_cls):
+    return recurrent_cls(
+        fir_filter_length=int(getattr(module, "short_filter_length", 3)),
+        state_dim=int(getattr(module, "state_size", 16)),
+    )
+
+
 def disable_evo_parallel_iir(model) -> int:
     """
     Force Evo Hyena filters to use recurrent IIR prefill instead of FFT IIR.
@@ -194,13 +212,7 @@ def disable_evo_parallel_iir(model) -> int:
                 setattr(config, "prefill_style", "recurrence")
 
         original_parallel_forward = module.parallel_forward
-        owner_module = sys.modules.get(module.__class__.__module__)
-        recurrent_cls = getattr(owner_module, "RecurrentInferenceParams", None)
-        if recurrent_cls is None:
-            raise RuntimeError(
-                f"Could not find RecurrentInferenceParams for {module.__class__.__module__}; "
-                "cannot disable Evo parallel IIR safely."
-            )
+        recurrent_cls = _evo_recurrent_params_cls(module)
 
         def recurrence_parallel_forward(
             self,
@@ -211,10 +223,7 @@ def disable_evo_parallel_iir(model) -> int:
             _recurrent_cls=recurrent_cls,
         ):
             if inference_params is None:
-                inference_params = _recurrent_cls(
-                    fir_filter_length=int(getattr(self, "short_filter_length", 3)),
-                    state_dim=int(getattr(self, "state_size", 16)),
-                )
+                inference_params = _new_evo_recurrent_params(self, _recurrent_cls)
             return _original_parallel_forward(
                 u,
                 inference_params=inference_params,
@@ -223,6 +232,53 @@ def disable_evo_parallel_iir(model) -> int:
 
         module.parallel_forward = types.MethodType(recurrence_parallel_forward, module)
         module._evo_parallel_iir_disabled = True
+        patched += 1
+    return patched
+
+
+def disable_evo_parallel_hyena(model) -> int:
+    """
+    Force Evo Hyena filters through sequential_forward instead of parallel_forward.
+
+    This is a heavy diagnostic/low-memory mode: it avoids the parallel Hyena path
+    entirely, not just the FFT IIR subroutine. Expect much slower training.
+    """
+    patched = 0
+    for module in model.modules():
+        required = ("forward", "parallel_forward", "sequential_forward", "short_filter_length", "state_size")
+        if not all(hasattr(module, name) for name in required):
+            continue
+        if getattr(module, "_evo_parallel_hyena_disabled", False):
+            continue
+        config = getattr(module, "config", None)
+        if config is not None:
+            try:
+                config["prefill_style"] = "recurrence"
+            except Exception:
+                setattr(config, "prefill_style", "recurrence")
+
+        recurrent_cls = _evo_recurrent_params_cls(module)
+
+        def sequential_forward_only(
+            self,
+            u,
+            inference_params=None,
+            padding_mask=None,
+            _recurrent_cls=recurrent_cls,
+        ):
+            if inference_params is None:
+                inference_params = _new_evo_recurrent_params(self, _recurrent_cls)
+            try:
+                return self.sequential_forward(
+                    u,
+                    inference_params=inference_params,
+                    padding_mask=padding_mask,
+                )
+            except TypeError:
+                return self.sequential_forward(u, inference_params)
+
+        module.forward = types.MethodType(sequential_forward_only, module)
+        module._evo_parallel_hyena_disabled = True
         patched += 1
     return patched
 
@@ -248,11 +304,11 @@ class EvoForMNTPLoRA(nn.Module):
         if labels is not None:
             logits_s = logits[:, :-1, :].contiguous()
             labels_s = labels[:, 1:].contiguous()
-            loss = F.cross_entropy(
-                logits_s.view(-1, logits_s.size(-1)),
-                labels_s.view(-1),
-                ignore_index=-100,
-            )
+            supervised = labels_s.ne(-100)
+            if supervised.any():
+                loss = F.cross_entropy(logits_s[supervised], labels_s[supervised])
+            else:
+                loss = logits_s.sum() * 0.0
         return MaskedLMOutput(loss=loss, logits=logits)
 
     def save_pretrained(self, output_dir: str, merge: bool = True):
@@ -324,6 +380,11 @@ def parse_args():
         help="Use Evo's recurrent IIR prefill instead of the default FFT parallel_iir path to reduce peak memory.",
     )
     p.add_argument(
+        "--disable-parallel-hyena",
+        action="store_true",
+        help="Force Evo Hyena filters through sequential_forward instead of parallel_forward. Very slow, lowest-memory diagnostic mode.",
+    )
+    p.add_argument(
         "--fsdp",
         default=None,
         help='Optional HF Trainer FSDP mode, e.g. "full_shard auto_wrap". Use with torchrun for multi-GPU sharding.',
@@ -377,7 +438,10 @@ def main():
 
     tokenizer = load_evo_tokenizer(args.model)
     model, _ = load_evo_causal_lm(args.model, device=device, dtype=dtype)
-    if args.disable_parallel_iir:
+    if args.disable_parallel_hyena:
+        patched = disable_evo_parallel_hyena(model)
+        print(f"  Disabled parallel Hyena  : patched {patched} Evo Hyena filters")
+    elif args.disable_parallel_iir:
         patched = disable_evo_parallel_iir(model)
         print(f"  Disabled parallel IIR    : patched {patched} Evo Hyena filters")
     expected_mask_id = None if args.mask_token_id < 0 else args.mask_token_id
