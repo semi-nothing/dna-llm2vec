@@ -14,6 +14,7 @@ import inspect
 import os
 import random
 import sys
+import types
 from dataclasses import dataclass
 
 import torch
@@ -169,6 +170,63 @@ def build_lora_config(model, args):
     )
 
 
+def disable_evo_parallel_iir(model) -> int:
+    """
+    Force Evo Hyena filters to use recurrent IIR prefill instead of FFT IIR.
+
+    The Evo remote code normally calls ``parallel_iir`` with ``inference_params=None``
+    during training, which always takes the FFT path and can create large fp32
+    temporaries. Passing a temporary RecurrentInferenceParams object plus
+    ``prefill_style="recurrence"`` selects the lower-memory recurrence branch.
+    """
+    patched = 0
+    for module in model.modules():
+        required = ("parallel_forward", "sequential_forward", "short_filter_length", "state_size")
+        if not all(hasattr(module, name) for name in required):
+            continue
+        if getattr(module, "_evo_parallel_iir_disabled", False):
+            continue
+        config = getattr(module, "config", None)
+        if config is not None:
+            try:
+                config["prefill_style"] = "recurrence"
+            except Exception:
+                setattr(config, "prefill_style", "recurrence")
+
+        original_parallel_forward = module.parallel_forward
+        owner_module = sys.modules.get(module.__class__.__module__)
+        recurrent_cls = getattr(owner_module, "RecurrentInferenceParams", None)
+        if recurrent_cls is None:
+            raise RuntimeError(
+                f"Could not find RecurrentInferenceParams for {module.__class__.__module__}; "
+                "cannot disable Evo parallel IIR safely."
+            )
+
+        def recurrence_parallel_forward(
+            self,
+            u,
+            inference_params=None,
+            padding_mask=None,
+            _original_parallel_forward=original_parallel_forward,
+            _recurrent_cls=recurrent_cls,
+        ):
+            if inference_params is None:
+                inference_params = _recurrent_cls(
+                    fir_filter_length=int(getattr(self, "short_filter_length", 3)),
+                    state_dim=int(getattr(self, "state_size", 16)),
+                )
+            return _original_parallel_forward(
+                u,
+                inference_params=inference_params,
+                padding_mask=padding_mask,
+            )
+
+        module.parallel_forward = types.MethodType(recurrence_parallel_forward, module)
+        module._evo_parallel_iir_disabled = True
+        patched += 1
+    return patched
+
+
 class EvoForMNTPLoRA(nn.Module):
     def __init__(self, base_model, lora_config):
         super().__init__()
@@ -210,10 +268,16 @@ class EvoForMNTPLoRA(nn.Module):
             self.peft_model.enable_input_require_grads()
         if hasattr(self.peft_model, "gradient_checkpointing_enable"):
             self.peft_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs or {"use_reentrant": False})
+        for module in self.peft_model.modules():
+            if hasattr(module, "gradient_checkpointing"):
+                module.gradient_checkpointing = True
 
     def gradient_checkpointing_disable(self):
         if hasattr(self.peft_model, "gradient_checkpointing_disable"):
             self.peft_model.gradient_checkpointing_disable()
+        for module in self.peft_model.modules():
+            if hasattr(module, "gradient_checkpointing"):
+                module.gradient_checkpointing = False
 
 
 class EvoMNTPTrainer(Trainer):
@@ -254,6 +318,11 @@ def parse_args():
     p.add_argument("--logging-steps", type=int, default=20)
     p.add_argument("--no-eval", action="store_true")
     p.add_argument("--gradient-checkpointing", action="store_true")
+    p.add_argument(
+        "--disable-parallel-iir",
+        action="store_true",
+        help="Use Evo's recurrent IIR prefill instead of the default FFT parallel_iir path to reduce peak memory.",
+    )
     p.add_argument(
         "--fsdp",
         default=None,
@@ -308,6 +377,9 @@ def main():
 
     tokenizer = load_evo_tokenizer(args.model)
     model, _ = load_evo_causal_lm(args.model, device=device, dtype=dtype)
+    if args.disable_parallel_iir:
+        patched = disable_evo_parallel_iir(model)
+        print(f"  Disabled parallel IIR    : patched {patched} Evo Hyena filters")
     expected_mask_id = None if args.mask_token_id < 0 else args.mask_token_id
     mask_token_id = resolve_mask_surrogate_id(tokenizer, args.mask_token, expected_mask_id)
     print(f"  Mask surrogate           : {args.mask_token!r} -> id {mask_token_id}")
