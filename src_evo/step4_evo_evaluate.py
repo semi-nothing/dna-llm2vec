@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import step4_evaluate as base  # noqa: E402
 from common import (  # noqa: E402
     count_parameters_m,
+    evo_backbone_hidden,
     evo_hidden_states,
     load_evo_causal_lm,
     load_evo_tokenizer,
@@ -68,7 +69,15 @@ def encode_sequences(
         batch = sequences[i : i + batch_size]
         with torch.inference_mode():
             input_ids, attention_mask = prepare_evo_batch(tokenizer, batch, max_length, device)
-            hidden = evo_hidden_states(model, input_ids, attention_mask).float()
+            # Match the fixed Evo baseline path: use the final StripedHyena
+            # sequence states before the tied vocab projection.  The public
+            # CausalLM forward can expose different tuple/hidden-state semantics
+            # across remote-code revisions, which is especially brittle for
+            # last-token pooling.
+            hidden = evo_backbone_hidden(model, input_ids, attention_mask)
+            if hidden is None:
+                hidden = evo_hidden_states(model, input_ids, attention_mask)
+            hidden = hidden.float()
             pooled = base.pool_hidden_states(
                 hidden=hidden,
                 attention_mask=attention_mask,
