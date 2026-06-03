@@ -26,7 +26,6 @@ from common import (  # noqa: E402
     evo_hidden_states,
     load_evo_causal_lm,
     load_evo_tokenizer,
-    mean_pool_embeddings,
     prepare_evo_batch,
 )
 
@@ -62,8 +61,7 @@ def encode_sequences(
     pooling: str = "mean",
     desc: str = "Encoding",
 ) -> np.ndarray:
-    if pooling != "mean":
-        raise ValueError("Evo wrapper currently supports mean pooling.")
+    """Encode sequences with Evo and return L2-normalised pooled embeddings."""
     model.eval()
     all_embeddings = []
     for i in tqdm(range(0, len(sequences), batch_size), desc=desc, leave=False):
@@ -71,7 +69,13 @@ def encode_sequences(
         with torch.inference_mode():
             input_ids, attention_mask = prepare_evo_batch(tokenizer, batch, max_length, device)
             hidden = evo_hidden_states(model, input_ids, attention_mask).float()
-            pooled = mean_pool_embeddings(hidden, attention_mask)
+            pooled = base.pool_hidden_states(
+                hidden=hidden,
+                attention_mask=attention_mask,
+                input_ids=input_ids,
+                pooling=pooling,
+                eos_token_id=tokenizer.eos_token_id,
+            )
             pooled = F.normalize(pooled, dim=-1)
         all_embeddings.append(pooled.cpu().float().numpy())
         del input_ids, attention_mask, hidden, pooled
