@@ -246,7 +246,15 @@ def evo_backbone_hidden(model, input_ids: torch.Tensor, attention_mask: torch.Te
     hidden = backbone.embedding_layer.embed(input_ids)
     try:
         hidden, _ = backbone.stateless_forward(hidden, padding_mask=attention_mask)
-    except TypeError:
+    except (TypeError, RuntimeError) as e:
+        message = str(e)
+        mask_related = (
+            "attention_mask" in message
+            or "padding_mask" in message
+            or "canUse32BitIndexMath" in message
+        )
+        if not mask_related:
+            raise
         hidden, _ = backbone.stateless_forward(hidden)
     if backbone.norm is not None:
         hidden = backbone.norm(hidden)
