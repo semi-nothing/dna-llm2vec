@@ -60,7 +60,6 @@ from common import (  # noqa: E402
     extract_hidden_states,
     load_hyena_backbone,
     load_hyena_tokenizer,
-    mean_pool_embeddings,
 )
 from hyena_bidirectional import maybe_activate_hyenadna_bidirectional  # noqa: E402
 from hyena_bidirectional import inspect_hyenadna_bidirectional  # noqa: E402
@@ -121,16 +120,61 @@ class HyenaSeqDataset(base.Dataset):
         }
 
 
-class HyenaDNAClassifier(nn.Module):
-    """Mean-pool final HyenaDNA hidden states, then apply a linear task head."""
+def pool_hyena_hidden(hidden: torch.Tensor, attention_mask: torch.Tensor, pooling: str) -> torch.Tensor:
+    mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
+    if pooling == "average":
+        return (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
+    if pooling == "weighted":
+        positions = torch.arange(
+            1, hidden.size(1) + 1, device=hidden.device, dtype=hidden.dtype
+        ).view(1, -1, 1)
+        weights = mask * positions
+        return (hidden * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+    if pooling == "last":
+        lengths = attention_mask.sum(dim=1).clamp_min(1).long() - 1
+        batch_idx = torch.arange(hidden.size(0), device=hidden.device)
+        return hidden[batch_idx, lengths]
+    raise ValueError(f"Unsupported pooling={pooling!r}")
 
-    def __init__(self, backbone, n_classes: int, hidden_dim: int):
+
+def build_classification_head(
+    hidden_dim: int,
+    n_classes: int,
+    head_type: str,
+    head_dropout: float,
+) -> nn.Module:
+    if head_type == "linear":
+        return nn.Linear(hidden_dim, n_classes)
+    if head_type == "mlp":
+        return nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(head_dropout),
+            nn.Linear(hidden_dim, n_classes),
+        )
+    raise ValueError(f"Unsupported head_type={head_type!r}")
+
+
+class HyenaDNAClassifier(nn.Module):
+    """Pool final HyenaDNA hidden states, then apply a task head."""
+
+    def __init__(
+        self,
+        backbone,
+        n_classes: int,
+        hidden_dim: int,
+        pooling: str = "average",
+        head_type: str = "linear",
+        head_dropout: float = 0.1,
+    ):
         super().__init__()
         # The shared training loop deep-copies the loaded base model per task.
         # Re-activate the non-serialized Hyena bidirectional forward patch on
         # that copy to keep H1/H2/H3... behaviour consistent after deepcopy.
         self.backbone = maybe_activate_hyenadna_bidirectional(backbone)
-        self.classifier = nn.Linear(hidden_dim, n_classes)
+        self.pooling = pooling
+        self.classifier = build_classification_head(hidden_dim, n_classes, head_type, head_dropout)
 
     def forward(self, input_ids, attention_mask):
         # If the checkpoint loaded as AutoModelForCausalLM, use the Hyena core
@@ -144,7 +188,7 @@ class HyenaDNAClassifier(nn.Module):
             return_dict=True,
         )
         hidden = extract_hidden_states(out)
-        pooled = mean_pool_embeddings(hidden, attention_mask)
+        pooled = pool_hyena_hidden(hidden, attention_mask, self.pooling)
         return self.classifier(pooled)
 
 

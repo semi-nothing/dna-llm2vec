@@ -62,12 +62,14 @@ sys.path.insert(0, SRC)
 sys.path.insert(0, HYENA_SRC)
 
 import step5_full_finetune_eval as base  # noqa: E402
-from common import extract_hidden_states, mean_pool_embeddings  # noqa: E402
+from common import extract_hidden_states  # noqa: E402
 from hyena_bidirectional import maybe_activate_hyenadna_bidirectional  # noqa: E402
 from step5_hyena_full_finetune_eval import (  # noqa: E402
     HyenaModelSpec,
     HyenaSeqDataset,
+    build_classification_head,
     load_base_model,
+    pool_hyena_hidden,
 )
 
 _ORIGINAL_PRINT_RESULTS_TABLE = base.print_results_table
@@ -131,12 +133,21 @@ def promote_trainable_parameters_to_fp32(model: nn.Module) -> dict[str, int]:
 
 
 class HyenaDNALoRAClassifier(nn.Module):
-    """Mean-pool Hyena hidden states from a PEFT-wrapped backbone."""
+    """Pool Hyena hidden states from a PEFT-wrapped backbone."""
 
-    def __init__(self, backbone, n_classes: int, hidden_dim: int):
+    def __init__(
+        self,
+        backbone,
+        n_classes: int,
+        hidden_dim: int,
+        pooling: str = "average",
+        head_type: str = "linear",
+        head_dropout: float = 0.1,
+    ):
         super().__init__()
         self.backbone = maybe_activate_hyenadna_bidirectional(backbone)
-        self.classifier = nn.Linear(hidden_dim, n_classes)
+        self.pooling = pooling
+        self.classifier = build_classification_head(hidden_dim, n_classes, head_type, head_dropout)
 
     def forward(self, input_ids, attention_mask):
         model = _peft_base_model(self.backbone)
@@ -148,8 +159,9 @@ class HyenaDNALoRAClassifier(nn.Module):
             return_dict=True,
         )
         hidden = extract_hidden_states(out)
-        pooled = mean_pool_embeddings(hidden, attention_mask)
-        pooled = pooled.to(dtype=self.classifier.weight.dtype)
+        pooled = pool_hyena_hidden(hidden, attention_mask, self.pooling)
+        head_dtype = next(self.classifier.parameters()).dtype
+        pooled = pooled.to(dtype=head_dtype)
         return self.classifier(pooled)
 
 
@@ -236,7 +248,14 @@ def train_one_task(
 
     hidden_dim = _infer_hidden_dim(backbone)
     dtype = next(backbone.parameters()).dtype
-    classifier = HyenaDNALoRAClassifier(backbone, n_cls, hidden_dim).to(device=device, dtype=dtype)
+    classifier = HyenaDNALoRAClassifier(
+        backbone,
+        n_cls,
+        hidden_dim,
+        pooling=args.pooling,
+        head_type=args.head_type,
+        head_dropout=args.head_dropout,
+    ).to(device=device, dtype=dtype)
     if args.trainable_fp32:
         before_counts = promote_trainable_parameters_to_fp32(classifier)
         print(
@@ -420,6 +439,9 @@ def parse_args():
     p.add_argument("--warmup-steps", type=int, default=50)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--grad-ckpt", action="store_true")
+    p.add_argument("--pooling", choices=("average", "last", "weighted"), default="average")
+    p.add_argument("--head-type", choices=("linear", "mlp"), default="linear")
+    p.add_argument("--head-dropout", type=float, default=0.1)
     p.add_argument(
         "--no-trainable-fp32",
         dest="trainable_fp32",

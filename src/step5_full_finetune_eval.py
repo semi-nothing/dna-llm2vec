@@ -331,12 +331,48 @@ def _collate_fn(batch, pad_token_id: int):
 # ── Classification model ──────────────────────────────────────────────────────
 
 class DNAClassifier(nn.Module):
-    """Mean-pool backbone hidden states → linear classification head."""
+    """Pool backbone hidden states, then apply a task classification head."""
 
-    def __init__(self, backbone, n_classes: int, hidden_dim: int):
+    def __init__(
+        self,
+        backbone,
+        n_classes: int,
+        hidden_dim: int,
+        pooling: str = "average",
+        head_type: str = "linear",
+        head_dropout: float = 0.1,
+    ):
         super().__init__()
-        self.backbone   = backbone
-        self.classifier = nn.Linear(hidden_dim, n_classes)
+        self.backbone = backbone
+        self.pooling = pooling
+        if head_type == "linear":
+            self.classifier = nn.Linear(hidden_dim, n_classes)
+        elif head_type == "mlp":
+            self.classifier = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(head_dropout),
+                nn.Linear(hidden_dim, n_classes),
+            )
+        else:
+            raise ValueError(f"Unsupported head_type={head_type!r}")
+
+    def _pool_hidden(self, hidden, attention_mask):
+        mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
+        if self.pooling == "average":
+            return (hidden * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+        if self.pooling == "weighted":
+            positions = torch.arange(
+                1, hidden.size(1) + 1, device=hidden.device, dtype=hidden.dtype
+            ).view(1, -1, 1)
+            weights = mask * positions
+            return (hidden * weights).sum(1) / weights.sum(1).clamp(min=1e-9)
+        if self.pooling == "last":
+            lengths = attention_mask.sum(dim=1).clamp_min(1).long() - 1
+            batch_idx = torch.arange(hidden.size(0), device=hidden.device)
+            return hidden[batch_idx, lengths]
+        raise ValueError(f"Unsupported pooling={self.pooling!r}")
 
     def forward(self, input_ids, attention_mask):
         if not hasattr(self.backbone, "transformer"):
@@ -350,8 +386,7 @@ class DNAClassifier(nn.Module):
             attention_mask=attention_mask,
         )
         hidden = out.last_hidden_state                         # (B, T, D)
-        mask   = attention_mask.unsqueeze(-1).to(hidden.dtype)
-        pooled = (hidden * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+        pooled = self._pool_hidden(hidden, attention_mask)
         # No L2 normalisation here — fine-tuning with a trained head benefits
         # from unconstrained embedding space. (step4 linear probe normalises
         # because logistic regression on the unit sphere is more stable.)
@@ -427,7 +462,14 @@ def train_one_task(
             backbone.transformer.gradient_checkpointing_enable({"use_reentrant": False})
     hidden_dim = backbone.config.n_embd
     dtype      = next(backbone.parameters()).dtype
-    classifier = DNAClassifier(backbone, n_cls, hidden_dim).to(device=device, dtype=dtype)
+    classifier = DNAClassifier(
+        backbone,
+        n_cls,
+        hidden_dim,
+        pooling=args.pooling,
+        head_type=args.head_type,
+        head_dropout=args.head_dropout,
+    ).to(device=device, dtype=dtype)
 
     # Optimizer: all backbone params + classifier head.
     trainable  = [p for p in classifier.parameters() if p.requires_grad]
@@ -674,6 +716,12 @@ def parse_args():
     p.add_argument("--grad-clip",    type=float, default=1.0)
     p.add_argument("--grad-ckpt",    action="store_true",
                    help="Enable gradient checkpointing to reduce activation memory.")
+    p.add_argument("--pooling", choices=("average", "last", "weighted"), default="average",
+                   help="Sequence pooling used before the classification head.")
+    p.add_argument("--head-type", choices=("linear", "mlp"), default="linear",
+                   help="Classification head: linear or a small LayerNorm-MLP.")
+    p.add_argument("--head-dropout", type=float, default=0.1,
+                   help="Dropout used inside --head-type mlp.")
     p.add_argument("--patience",     type=int, default=0,
                    help="Early stopping patience in epochs. 0 disables early stopping.")
     p.add_argument("--monitor",      choices=("f1", "mcc", "accuracy"), default="mcc",
