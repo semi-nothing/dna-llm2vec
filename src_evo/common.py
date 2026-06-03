@@ -234,6 +234,11 @@ def extract_hidden_states(out: Any) -> torch.Tensor:
     raise TypeError(f"Unsupported Evo output type {type(out)!r}.")
 
 
+def is_evo_32bit_index_error(exc: BaseException) -> bool:
+    message = str(exc)
+    return "canUse32BitIndexMath" in message
+
+
 def evo_backbone_hidden(model, input_ids: torch.Tensor, attention_mask: torch.Tensor | None):
     model = peft_base_model(model)
     backbone = getattr(model, "backbone", None)
@@ -247,11 +252,12 @@ def evo_backbone_hidden(model, input_ids: torch.Tensor, attention_mask: torch.Te
     try:
         hidden, _ = backbone.stateless_forward(hidden, padding_mask=attention_mask)
     except (TypeError, RuntimeError) as e:
+        if is_evo_32bit_index_error(e):
+            raise
         message = str(e)
         mask_related = (
             "attention_mask" in message
             or "padding_mask" in message
-            or "canUse32BitIndexMath" in message
         )
         if not mask_related:
             raise

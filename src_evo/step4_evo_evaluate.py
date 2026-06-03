@@ -25,6 +25,7 @@ from common import (  # noqa: E402
     count_parameters_m,
     evo_backbone_hidden,
     evo_hidden_states,
+    is_evo_32bit_index_error,
     load_evo_causal_lm,
     load_evo_tokenizer,
     prepare_evo_batch,
@@ -52,6 +53,48 @@ def load_model(spec, device: str, dtype):
     return model, tokenizer
 
 
+def _encode_evo_batch(
+    model,
+    tokenizer,
+    batch: list[str],
+    max_length: int,
+    device: str,
+    pooling: str,
+) -> torch.Tensor:
+    input_ids, attention_mask = prepare_evo_batch(tokenizer, batch, max_length, device)
+    try:
+        hidden = evo_backbone_hidden(model, input_ids, attention_mask)
+        if hidden is None:
+            hidden = evo_hidden_states(model, input_ids, attention_mask)
+    except RuntimeError as e:
+        if not is_evo_32bit_index_error(e) or len(batch) <= 1:
+            raise
+        del input_ids, attention_mask
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        if not getattr(_encode_evo_batch, "_warned_32bit_index", False):
+            print("[evo] CUDA FIR kernel hit 32-bit indexing limit; retrying with smaller microbatches.")
+            _encode_evo_batch._warned_32bit_index = True
+        midpoint = len(batch) // 2
+        pieces = [
+            _encode_evo_batch(model, tokenizer, batch[:midpoint], max_length, device, pooling),
+            _encode_evo_batch(model, tokenizer, batch[midpoint:], max_length, device, pooling),
+        ]
+        return torch.cat(pieces, dim=0)
+
+    hidden = hidden.float()
+    pooled = base.pool_hidden_states(
+        hidden=hidden,
+        attention_mask=attention_mask,
+        input_ids=input_ids,
+        pooling=pooling,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+    pooled = F.normalize(pooled, dim=-1)
+    del input_ids, attention_mask, hidden
+    return pooled
+
+
 def encode_sequences(
     model,
     tokenizer,
@@ -68,26 +111,9 @@ def encode_sequences(
     for i in tqdm(range(0, len(sequences), batch_size), desc=desc, leave=False):
         batch = sequences[i : i + batch_size]
         with torch.inference_mode():
-            input_ids, attention_mask = prepare_evo_batch(tokenizer, batch, max_length, device)
-            # Match the fixed Evo baseline path: use the final StripedHyena
-            # sequence states before the tied vocab projection.  The public
-            # CausalLM forward can expose different tuple/hidden-state semantics
-            # across remote-code revisions, which is especially brittle for
-            # last-token pooling.
-            hidden = evo_backbone_hidden(model, input_ids, attention_mask)
-            if hidden is None:
-                hidden = evo_hidden_states(model, input_ids, attention_mask)
-            hidden = hidden.float()
-            pooled = base.pool_hidden_states(
-                hidden=hidden,
-                attention_mask=attention_mask,
-                input_ids=input_ids,
-                pooling=pooling,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-            pooled = F.normalize(pooled, dim=-1)
+            pooled = _encode_evo_batch(model, tokenizer, batch, max_length, device, pooling)
         all_embeddings.append(pooled.cpu().float().numpy())
-        del input_ids, attention_mask, hidden, pooled
+        del pooled
         if device == "cuda":
             torch.cuda.empty_cache()
     return np.concatenate(all_embeddings, axis=0)
