@@ -254,6 +254,14 @@ def evo_backbone_hidden(model, input_ids: torch.Tensor, attention_mask: torch.Te
 
 
 def evo_hidden_states(model, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
+    # Prefer the final StripedHyena sequence states before the tied vocab
+    # projection.  Public CausalLM forward hidden-state semantics vary across
+    # Evo remote-code revisions and are brittle for representation pooling,
+    # especially last-token pooling.
+    hidden = evo_backbone_hidden(model, input_ids, attention_mask)
+    if hidden is not None:
+        return hidden
+
     try:
         out = model(
             input_ids=input_ids,
