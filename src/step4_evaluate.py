@@ -476,6 +476,7 @@ def encode_sequences(
     max_length: int,
     device: str,
     pooling: str = "mean",
+    normalize: bool = True,
     desc: str = "Encoding",
 ) -> np.ndarray:
     """Pool + L2-normalise embeddings. Returns float32 array (N, D)."""
@@ -523,7 +524,8 @@ def encode_sequences(
                 pooling=pooling,
                 eos_token_id=tokenizer.eos_token_id,
             )
-            pooled = F.normalize(pooled, dim=-1)
+            if normalize:
+                pooled = F.normalize(pooled, dim=-1)
 
         all_embeddings.append(pooled.cpu().float().numpy())
         del enc, out, hidden, pooled
@@ -537,6 +539,9 @@ def run_linear_probe(
     train_emb: np.ndarray, train_labels: list,
     test_emb:  np.ndarray, test_labels:  list,
     seed: int = 42,
+    debug_name: str | None = None,
+    standardize: bool = False,
+    class_weight: str | None = None,
 ) -> dict:
     """Train a logistic regression probe and return accuracy, F1 (macro), and MCC.
 
@@ -547,19 +552,46 @@ def run_linear_probe(
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import LabelEncoder
     from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef
+    from sklearn.preprocessing import StandardScaler
 
     le      = LabelEncoder()
     train_y = le.fit_transform(train_labels)
     test_y  = le.transform(test_labels)
 
-    clf = LogisticRegression(max_iter=1000, solver="lbfgs", C=1.0, random_state=seed)
+    if standardize:
+        scaler = StandardScaler()
+        train_emb = scaler.fit_transform(train_emb)
+        test_emb = scaler.transform(test_emb)
+
+    clf = LogisticRegression(
+        max_iter=5000,
+        solver="lbfgs",
+        C=1.0,
+        class_weight=class_weight,
+        random_state=seed,
+    )
     clf.fit(train_emb, train_y)
     preds = clf.predict(test_emb)
+    pred_counts = np.bincount(preds, minlength=len(le.classes_)).astype(int)
+    label_counts = np.bincount(test_y, minlength=len(le.classes_)).astype(int)
+    if debug_name:
+        train_norm = np.linalg.norm(train_emb, axis=1)
+        test_norm = np.linalg.norm(test_emb, axis=1)
+        print(
+            f"       [probe] {debug_name}: "
+            f"test_labels={label_counts.tolist()} preds={pred_counts.tolist()} "
+            f"train_norm={train_norm.mean():.3g}+/-{train_norm.std():.3g} "
+            f"test_norm={test_norm.mean():.3g}+/-{test_norm.std():.3g}"
+        )
 
     return {
         "accuracy": float(accuracy_score(test_y, preds)),
         "f1":       float(f1_score(test_y, preds, average="macro")),
         "mcc":      float(matthews_corrcoef(test_y, preds)),
+        "test_label_counts": label_counts.tolist(),
+        "pred_label_counts": pred_counts.tolist(),
+        "probe_standardize": bool(standardize),
+        "probe_class_weight": class_weight or "none",
     }
 
 
@@ -685,6 +717,22 @@ def parse_args():
         help="Embedding pooling strategy. mean keeps previous Step4 behaviour; "
              "last and weighted_mean match common LLM2Vec-style evaluation choices.",
     )
+    p.add_argument(
+        "--no-l2-normalize",
+        action="store_true",
+        help="Disable L2 normalization of pooled sequence embeddings before the linear probe.",
+    )
+    p.add_argument(
+        "--probe-standardize",
+        action="store_true",
+        help="Standardize embedding dimensions with train-split statistics before the linear probe.",
+    )
+    p.add_argument(
+        "--probe-class-weight",
+        choices=("none", "balanced"),
+        default="none",
+        help="Class weighting for the logistic-regression probe.",
+    )
     p.add_argument("--run-name", default=None,
                    help="Optional W&B run name. If omitted, a descriptive name is generated.")
     p.add_argument("--seed", type=int, default=42,
@@ -764,6 +812,13 @@ def main():
     else:
         active = ALL_BENCHMARKS + (GUE_PLUS_EPI_BENCHMARKS if args.gue_plus_dir else [])
 
+    if any(b[3] == "gue+" for b in active) and args.max_length < args.epi_crop_bp:
+        print(
+            f"  [warn] --max-length {args.max_length} is smaller than "
+            f"--epi-crop-bp {args.epi_crop_bp}; tokenizers with near 1 bp/token "
+            "will truncate EPI crops before pooling."
+        )
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype  = torch.bfloat16 if device == "cuda" else torch.float32
 
@@ -780,6 +835,8 @@ def main():
     print(f"  Models     : {[s.name for s in specs]}")
     print(f"  Max length : {args.max_length}")
     print(f"  Pooling    : {args.pooling}")
+    print(f"  L2 norm    : {not args.no_l2_normalize}")
+    print(f"  Probe      : standardize={args.probe_standardize}  class_weight={args.probe_class_weight}")
     print(f"  Seed       : {args.seed}")
     if args.repeat_index is not None:
         print(f"  Repeat     : {args.repeat_index}")
@@ -808,6 +865,9 @@ def main():
                     "models":     args.models,
                     "max_length": args.max_length,
                     "pooling":    args.pooling,
+                    "l2_normalize": not args.no_l2_normalize,
+                    "probe_standardize": args.probe_standardize,
+                    "probe_class_weight": args.probe_class_weight,
                     "seed":       args.seed,
                     "repeat_index": args.repeat_index,
                     "gb_tasks":   gb_n,
@@ -856,13 +916,24 @@ def main():
             train_emb = encode_sequences(model, tokenizer, train_seqs,
                                          args.batch_size, args.max_length, device,
                                          pooling=args.pooling,
+                                         normalize=not args.no_l2_normalize,
                                          desc=f"  {display_name} train")
             test_emb  = encode_sequences(model, tokenizer, test_seqs,
                                          args.batch_size, args.max_length, device,
                                          pooling=args.pooling,
+                                         normalize=not args.no_l2_normalize,
                                          desc=f"  {display_name} test ")
 
-            metrics = run_linear_probe(train_emb, train_labels, test_emb, test_labels, seed=args.seed)
+            metrics = run_linear_probe(
+                train_emb,
+                train_labels,
+                test_emb,
+                test_labels,
+                seed=args.seed,
+                debug_name=display_name if source == "gue+" else None,
+                standardize=args.probe_standardize,
+                class_weight=None if args.probe_class_weight == "none" else args.probe_class_weight,
+            )
             results[spec.name][task_key] = metrics
 
             # Display all task metrics for every suite so later comparisons do not

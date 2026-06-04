@@ -60,6 +60,7 @@ def _encode_evo_batch(
     max_length: int,
     device: str,
     pooling: str,
+    normalize: bool,
 ) -> torch.Tensor:
     input_ids, attention_mask = prepare_evo_batch(tokenizer, batch, max_length, device)
     try:
@@ -77,8 +78,8 @@ def _encode_evo_batch(
             _encode_evo_batch._warned_32bit_index = True
         midpoint = len(batch) // 2
         pieces = [
-            _encode_evo_batch(model, tokenizer, batch[:midpoint], max_length, device, pooling),
-            _encode_evo_batch(model, tokenizer, batch[midpoint:], max_length, device, pooling),
+            _encode_evo_batch(model, tokenizer, batch[:midpoint], max_length, device, pooling, normalize),
+            _encode_evo_batch(model, tokenizer, batch[midpoint:], max_length, device, pooling, normalize),
         ]
         return torch.cat(pieces, dim=0)
 
@@ -90,7 +91,8 @@ def _encode_evo_batch(
         pooling=pooling,
         eos_token_id=tokenizer.eos_token_id,
     )
-    pooled = F.normalize(pooled, dim=-1)
+    if normalize:
+        pooled = F.normalize(pooled, dim=-1)
     del input_ids, attention_mask, hidden
     return pooled
 
@@ -103,6 +105,7 @@ def encode_sequences(
     max_length: int,
     device: str,
     pooling: str = "mean",
+    normalize: bool = True,
     desc: str = "Encoding",
 ) -> np.ndarray:
     """Encode sequences with Evo and return L2-normalised pooled embeddings."""
@@ -111,7 +114,7 @@ def encode_sequences(
     for i in tqdm(range(0, len(sequences), batch_size), desc=desc, leave=False):
         batch = sequences[i : i + batch_size]
         with torch.inference_mode():
-            pooled = _encode_evo_batch(model, tokenizer, batch, max_length, device, pooling)
+            pooled = _encode_evo_batch(model, tokenizer, batch, max_length, device, pooling, normalize)
         all_embeddings.append(pooled.cpu().float().numpy())
         del pooled
         if device == "cuda":
