@@ -27,6 +27,63 @@ def resolve_path(model_name_or_path: str) -> str:
     return os.path.abspath(model_name_or_path) if os.path.exists(model_name_or_path) else model_name_or_path
 
 
+def _is_local_checkpoint(path: str) -> bool:
+    return os.path.isdir(path)
+
+
+def _copy_python_siblings(src_path: str | None, output_dir: str, overwrite: bool = True) -> None:
+    """Copy remote-code sibling modules such as model.py and tokenizer.py."""
+    if not src_path or not os.path.isfile(src_path):
+        return
+    src_dir = os.path.dirname(src_path)
+    for filename in os.listdir(src_dir):
+        if filename.endswith(".py") and filename != "__init__.py":
+            dst_path = os.path.join(output_dir, filename)
+            if not overwrite and os.path.isfile(dst_path):
+                continue
+            _copy_if_present(os.path.join(src_dir, filename), output_dir)
+
+
+def _repair_local_remote_code_artifacts(path: str) -> None:
+    """
+    Best-effort repair for older local Evo checkpoints.
+
+    Transformers builds a dynamic module cache from files present in the local
+    checkpoint. Evo remote code imports sibling modules (for example
+    ``model.py`` imports ``tokenizer.py``), so checkpoints saved before we
+    copied every sibling can fail with ``No module named ...tokenizer``.
+    """
+    if not _is_local_checkpoint(path):
+        return
+    if os.path.isfile(os.path.join(path, "tokenizer.py")):
+        return
+
+    source = os.environ.get("EVO_REMOTE_CODE_SOURCE", DEFAULT_EVO_MODEL)
+    if os.path.exists(source) and os.path.abspath(source) == os.path.abspath(path):
+        return
+
+    try:
+        source_path = resolve_path(source)
+        tokenizer = AutoTokenizer.from_pretrained(
+            source_path,
+            trust_remote_code=True,
+            revision=DEFAULT_EVO_REVISION,
+        )
+    except Exception as e:
+        print(f"[evo] could not repair local remote-code files from {source!r}: {e}")
+        return
+
+    try:
+        src_file = inspect.getfile(tokenizer.__class__)
+    except (TypeError, OSError) as e:
+        print(f"[evo] could not locate Evo tokenizer remote-code source: {e}")
+        return
+
+    _copy_python_siblings(src_file, path, overwrite=False)
+    if os.path.isfile(os.path.join(path, "tokenizer.py")):
+        print(f"[evo] repaired local remote-code files in {path!r} from {source!r}.")
+
+
 def set_existing_byte_pad_token(tokenizer) -> None:
     """Set padding to an existing token without resizing Evo embeddings."""
     if tokenizer.pad_token is not None and tokenizer.pad_token_id is not None:
@@ -53,6 +110,7 @@ def set_existing_byte_pad_token(tokenizer) -> None:
 
 def load_evo_tokenizer(model_name_or_path: str):
     path = resolve_path(model_name_or_path)
+    _repair_local_remote_code_artifacts(path)
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             path,
@@ -83,6 +141,7 @@ def load_evo_causal_lm(
     dtype: torch.dtype = torch.float32,
 ):
     path = resolve_path(model_name_or_path)
+    _repair_local_remote_code_artifacts(path)
     config = AutoConfig.from_pretrained(
         path,
         trust_remote_code=True,
@@ -125,6 +184,7 @@ def copy_remote_code_artifacts(model, tokenizer, output_dir: str) -> None:
             pass
     for path in candidates:
         _copy_if_present(path, output_dir)
+        _copy_python_siblings(path, output_dir)
 
 
 def save_evo_checkpoint(model, tokenizer, output_dir: str) -> None:

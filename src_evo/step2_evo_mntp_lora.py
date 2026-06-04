@@ -197,11 +197,11 @@ class EvoForMNTPLoRA(nn.Module):
                 loss = logits_s.sum() * 0.0
         return MaskedLMOutput(loss=loss, logits=logits)
 
-    def save_pretrained(self, output_dir: str, merge: bool = True):
+    def save_pretrained(self, output_dir: str, merge: bool = True, tokenizer=None):
         os.makedirs(output_dir, exist_ok=True)
         if merge:
             model = self.peft_model.merge_and_unload()
-            save_evo_checkpoint(model, None, output_dir)
+            save_evo_checkpoint(model, tokenizer, output_dir)
         else:
             self.peft_model.save_pretrained(output_dir)
 
@@ -367,7 +367,7 @@ def main():
     trainer = EvoMNTPTrainer(**trainer_kwargs)
     trainer.train()
     wrapper.peft_model.base_model.model.config.evo_training_stage = "E2_mntp_lora"
-    wrapper.save_pretrained(args.output, merge=True)
+    wrapper.save_pretrained(args.output, merge=True, tokenizer=tokenizer)
     tokenizer.save_pretrained(args.output)
     gc.collect()
     if torch.cuda.is_available():

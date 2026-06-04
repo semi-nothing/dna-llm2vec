@@ -215,11 +215,11 @@ class EvoForContrastiveLoRA(nn.Module):
         loss = 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels))
         return type("ContrastiveOutput", (), {"loss": loss})()
 
-    def save_pretrained(self, output_dir: str, merge: bool = True):
+    def save_pretrained(self, output_dir: str, merge: bool = True, tokenizer=None):
         os.makedirs(output_dir, exist_ok=True)
         if merge:
             model = self.peft_model.merge_and_unload()
-            save_evo_checkpoint(model, None, output_dir)
+            save_evo_checkpoint(model, tokenizer, output_dir)
         else:
             self.peft_model.save_pretrained(output_dir)
             if self.proj is not None:
@@ -386,7 +386,7 @@ def main():
     trainer.train()
     stage_num = {"dropout": 3, "revcomp": 4, "crop": 5, "local_shift": 6}[args.mode]
     wrapper.peft_model.base_model.model.config.evo_training_stage = f"E{stage_num}_{args.mode}_lora"
-    wrapper.save_pretrained(args.output, merge=True)
+    wrapper.save_pretrained(args.output, merge=True, tokenizer=tokenizer)
     tokenizer.save_pretrained(args.output)
     gc.collect()
     if torch.cuda.is_available():
