@@ -62,6 +62,20 @@ def _reload_local_state_after_patch(model, model_name_or_path: str):
     return model
 
 
+def _initial_state_dict_without_bidir_keys(model_name_or_path: str):
+    path = resolve_path(model_name_or_path)
+    state_path = os.path.join(path, "pytorch_model.bin") if os.path.isdir(path) else None
+    if state_path is None or not os.path.isfile(state_path):
+        return None
+
+    state_dict = torch.load(state_path, map_location="cpu")
+    return {
+        key: value
+        for key, value in state_dict.items()
+        if "reverse_" not in key and "direction_gate" not in key
+    }
+
+
 def _move_and_prepare(model, model_name_or_path: str, device: str):
     model = maybe_activate_hyenadna_bidirectional(model)
     model = _reload_local_state_after_patch(model, model_name_or_path)
@@ -74,12 +88,14 @@ def _move_and_prepare(model, model_name_or_path: str, device: str):
 def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: torch.dtype = torch.float32):
     path = resolve_path(model_name_or_path)
     errors: list[str] = []
+    initial_state_dict = _initial_state_dict_without_bidir_keys(model_name_or_path)
 
     try:
         model = AutoModel.from_pretrained(
             path,
             trust_remote_code=True,
             dtype=dtype,
+            state_dict=initial_state_dict,
         )
         return _move_and_prepare(model, model_name_or_path, device), "AutoModel"
     except Exception as e:
@@ -90,6 +106,7 @@ def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: tor
             path,
             trust_remote_code=True,
             dtype=dtype,
+            state_dict=initial_state_dict,
         )
         return _move_and_prepare(model, model_name_or_path, device), "AutoModelForCausalLM"
     except Exception as e:
@@ -102,10 +119,12 @@ def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: tor
 
 def load_hyena_causal_lm(model_name_or_path: str, device: str = "cpu", dtype: torch.dtype = torch.float32):
     path = resolve_path(model_name_or_path)
+    initial_state_dict = _initial_state_dict_without_bidir_keys(model_name_or_path)
     model = AutoModelForCausalLM.from_pretrained(
         path,
         trust_remote_code=True,
         dtype=dtype,
+        state_dict=initial_state_dict,
     )
     model = _move_and_prepare(model, model_name_or_path, device)
     return model, "AutoModelForCausalLM"

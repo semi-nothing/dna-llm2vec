@@ -143,6 +143,8 @@ def make_hyenadna_bidirectional(model):
         total_operators += 1
         setattr(module, "bidirectional", True)
         _attach_reverse_branch(module)
+        setattr(module.filter_fn, "bidirectional", True)
+        setattr(module.reverse_filter_fn, "bidirectional", True)
         if (
             not getattr(module, "_hyena_honest_bidirectional_operator_forward_patched", False)
             or not _is_forward_bound_to(module, _hyena_operator_forward_honest_bidirectional)
