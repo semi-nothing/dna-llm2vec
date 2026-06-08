@@ -106,14 +106,17 @@ def _hyena_operator_forward_honest_bidirectional(self, u):
 
 def _attach_reverse_branch(module) -> bool:
     created = False
+    ref = module.short_filter.weight
+    device = ref.device
+    dtype = ref.dtype
     if not hasattr(module, "reverse_short_filter"):
-        module.reverse_short_filter = copy.deepcopy(module.short_filter)
+        module.reverse_short_filter = copy.deepcopy(module.short_filter).to(device=device, dtype=dtype)
         created = True
     if not hasattr(module, "reverse_filter_fn"):
-        module.reverse_filter_fn = copy.deepcopy(module.filter_fn)
+        module.reverse_filter_fn = copy.deepcopy(module.filter_fn).to(device=device, dtype=dtype)
         created = True
     if not hasattr(module, "direction_gate"):
-        module.direction_gate = nn.Parameter(torch.zeros(module.d_model))
+        module.direction_gate = nn.Parameter(torch.zeros(module.d_model, device=device, dtype=dtype))
         created = True
     return created
 

@@ -135,12 +135,18 @@ def _hyena_operator_forward_gated_bidirectional(self, u):
 
 def _attach_filter_gate(module) -> None:
     if not hasattr(module, "direction_gate"):
-        module.direction_gate = nn.Parameter(torch.zeros(module.d_model))
+        ref = module.bias
+        module.direction_gate = nn.Parameter(
+            torch.zeros(module.d_model, device=ref.device, dtype=ref.dtype)
+        )
 
 
 def _attach_operator_gate(module) -> None:
     if not hasattr(module, "short_direction_gate"):
-        module.short_direction_gate = nn.Parameter(torch.zeros(module.short_filter.out_channels))
+        ref = module.short_filter.weight
+        module.short_direction_gate = nn.Parameter(
+            torch.zeros(module.short_filter.out_channels, device=ref.device, dtype=ref.dtype)
+        )
 
 
 def make_hyenadna_bidirectional(model):
