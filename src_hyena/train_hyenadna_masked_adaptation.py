@@ -233,7 +233,7 @@ def build_training_args(args) -> TrainingArguments:
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
-        save_total_limit=2,
+        save_total_limit=None if args.save_total_limit <= 0 else args.save_total_limit,
         save_strategy=save_strategy,
         load_best_model_at_end=(args.train_mode == "full"),
         dataloader_num_workers=args.dataloader_num_workers,
@@ -485,6 +485,12 @@ def parse_args():
 
     p.add_argument("--logging-steps", type=int, default=50)
     p.add_argument("--save-steps", type=int, default=500)
+    p.add_argument(
+        "--save-total-limit",
+        type=int,
+        default=0,
+        help="Maximum number of Trainer checkpoints to keep. Use 0 to keep all checkpoints.",
+    )
     p.add_argument("--eval-steps", type=int, default=500)
     p.add_argument("--dataloader-num-workers", type=int, default=4)
     p.add_argument("--report-to", default="wandb", choices=["none", "wandb"])

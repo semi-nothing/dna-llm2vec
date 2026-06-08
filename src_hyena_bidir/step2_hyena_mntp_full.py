@@ -26,6 +26,8 @@ def _inject_full_defaults() -> None:
             )
     if "--train-mode" not in sys.argv:
         sys.argv.extend(["--train-mode", "full"])
+    if "--save-total-limit" not in sys.argv:
+        sys.argv.extend(["--save-total-limit", "0"])
     if "--model" not in sys.argv:
         sys.argv.extend(["--model", "./hyena_honest_bidir_h1"])
     if "--output" not in sys.argv:

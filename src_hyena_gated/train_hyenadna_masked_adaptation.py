@@ -38,6 +38,9 @@ def _enforce_full_only() -> None:
     else:
         sys.argv.extend(["--train-mode", "full"])
 
+    if "--save-total-limit" not in sys.argv:
+        sys.argv.extend(["--save-total-limit", "0"])
+
 
 _enforce_full_only()
 
