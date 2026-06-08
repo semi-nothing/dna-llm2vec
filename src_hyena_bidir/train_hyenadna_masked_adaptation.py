@@ -22,6 +22,7 @@ _OLD_TRAIN_PATH = os.path.join(OLD_HYENA_DIR, "train_hyenadna_masked_adaptation.
 _spec = importlib.util.spec_from_file_location("_old_hyena_train_masked_adaptation", _OLD_TRAIN_PATH)
 _old_train = importlib.util.module_from_spec(_spec)
 assert _spec is not None and _spec.loader is not None
+sys.modules[_spec.name] = _old_train
 _spec.loader.exec_module(_old_train)
 main = _old_train.main
 

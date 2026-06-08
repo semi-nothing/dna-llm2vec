@@ -21,6 +21,7 @@ _OLD_STEP3_PATH = os.path.join(OLD_HYENA_DIR, "step3_hyena_contrastive_lora.py")
 _spec = importlib.util.spec_from_file_location("_old_hyena_step3_contrastive", _OLD_STEP3_PATH)
 _old_step3 = importlib.util.module_from_spec(_spec)
 assert _spec is not None and _spec.loader is not None
+sys.modules[_spec.name] = _old_step3
 _spec.loader.exec_module(_old_step3)
 main = _old_step3.main
 

@@ -19,6 +19,9 @@ _OLD_COMMON_PATH = os.path.join(OLD_HYENA_DIR, "common.py")
 _spec = importlib.util.spec_from_file_location("_old_hyena_common", _OLD_COMMON_PATH)
 _old_common = importlib.util.module_from_spec(_spec)
 assert _spec is not None and _spec.loader is not None
+import sys
+
+sys.modules[_spec.name] = _old_common
 _spec.loader.exec_module(_old_common)
 
 

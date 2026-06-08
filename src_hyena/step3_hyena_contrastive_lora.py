@@ -483,7 +483,7 @@ def build_training_args(args) -> TrainingArguments:
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
-        save_total_limit=2,
+        save_total_limit=None if args.save_total_limit <= 0 else args.save_total_limit,
         save_strategy=save_strategy,
         # Checkpoints save the Hyena backbone for Step 4 compatibility rather
         # than the transient contrastive wrapper, so avoid Trainer reloading
@@ -617,6 +617,12 @@ def parse_args():
 
     p.add_argument("--logging-steps", type=int, default=20)
     p.add_argument("--save-steps", type=int, default=200)
+    p.add_argument(
+        "--save-total-limit",
+        type=int,
+        default=0,
+        help="Maximum number of Trainer checkpoints to keep. Use 0 to keep all checkpoints.",
+    )
     p.add_argument("--eval-steps", type=int, default=200)
     p.add_argument("--dataloader-num-workers", type=int, default=4)
     p.add_argument("--no-pin-memory", action="store_true")
