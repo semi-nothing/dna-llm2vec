@@ -34,7 +34,7 @@ def _enforce_full_only() -> None:
         if mode != "full":
             raise SystemExit(
                 "src_hyena_gated only supports full Stage-2 MNTP. "
-                "LoRA would freeze the learned direction gates."
+                "LoRA would freeze the learned direction projection."
             )
     else:
         sys.argv.extend(["--train-mode", "full"])

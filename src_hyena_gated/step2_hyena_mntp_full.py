@@ -22,7 +22,7 @@ def _inject_full_defaults() -> None:
         if mode != "full":
             raise SystemExit(
                 "src_hyena_gated only supports full Stage-2 MNTP. "
-                "LoRA would freeze the learned direction gates."
+                "LoRA would freeze the learned direction projection."
             )
     if "--train-mode" not in sys.argv:
         sys.argv.extend(["--train-mode", "full"])

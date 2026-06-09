@@ -47,17 +47,18 @@ def _reload_local_state_after_patch(model, model_name_or_path: str):
     incompatible = model.load_state_dict(state_dict, strict=False)
     missing = list(getattr(incompatible, "missing_keys", []))
     unexpected = list(getattr(incompatible, "unexpected_keys", []))
-    gate_missing = [k for k in missing if "direction_gate" in k]
-    gate_unexpected = [k for k in unexpected if "direction_gate" in k]
+    projection_missing = [k for k in missing if "direction_projection" in k]
+    projection_unexpected = [k for k in unexpected if "direction_projection" in k]
     print(
-        "  Gated-bidir reload       : "
+        "  Projected-bidir reload   : "
         f"missing={len(missing)}, unexpected={len(unexpected)}, "
-        f"gate missing={len(gate_missing)}, gate unexpected={len(gate_unexpected)}"
+        f"projection missing={len(projection_missing)}, "
+        f"projection unexpected={len(projection_unexpected)}"
     )
-    if gate_missing:
-        print(f"  Gated-bidir missing sample: {gate_missing[:3]}")
-    if gate_unexpected:
-        print(f"  Gated-bidir unexpected sample: {gate_unexpected[:3]}")
+    if projection_missing:
+        print(f"  Projected-bidir missing sample: {projection_missing[:3]}")
+    if projection_unexpected:
+        print(f"  Projected-bidir unexpected sample: {projection_unexpected[:3]}")
     return model
 
 
