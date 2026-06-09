@@ -84,6 +84,29 @@ class HyenaDNAForMaskedAdaptation(nn.Module):
         self.base_model = base_model
         self.config = _base_model_for_config(base_model).config
 
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        if hasattr(self.base_model, "gradient_checkpointing_enable"):
+            if gradient_checkpointing_kwargs is None:
+                return self.base_model.gradient_checkpointing_enable()
+            try:
+                return self.base_model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
+                )
+            except TypeError:
+                return self.base_model.gradient_checkpointing_enable()
+
+        backbone = getattr(getattr(self.base_model, "hyena", None), "backbone", None)
+        if backbone is not None:
+            backbone.gradient_checkpointing = True
+
+    def gradient_checkpointing_disable(self):
+        if hasattr(self.base_model, "gradient_checkpointing_disable"):
+            return self.base_model.gradient_checkpointing_disable()
+
+        backbone = getattr(getattr(self.base_model, "hyena", None), "backbone", None)
+        if backbone is not None:
+            backbone.gradient_checkpointing = False
+
     def forward(
         self,
         input_ids: torch.Tensor,
