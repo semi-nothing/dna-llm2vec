@@ -517,6 +517,11 @@ def parse_args():
     p.add_argument("--eval-steps", type=int, default=500)
     p.add_argument("--dataloader-num-workers", type=int, default=4)
     p.add_argument("--report-to", default="wandb", choices=["none", "wandb"])
+    p.add_argument(
+        "--resume-from-checkpoint",
+        default=None,
+        help="Optional Trainer checkpoint directory to resume Step 2 from.",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--run-name", default="hyena_step2_span_masked_mntp")
     return p.parse_args()
@@ -641,7 +646,7 @@ def main():
     )
 
     print("\n[2/4] Training span-masked MNTP adaptation")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     print("\n[3/4] Saving H2 checkpoint")
     _base_model_for_config(wrapper.base_model).config.hyena_training_stage = "H2"
