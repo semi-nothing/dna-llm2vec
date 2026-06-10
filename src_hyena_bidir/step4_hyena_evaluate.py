@@ -62,6 +62,7 @@ def encode_sequences(
     max_length: int,
     device: str,
     pooling: str = "mean",
+    normalize: bool = True,
     desc: str = "Encoding",
 ) -> np.ndarray:
     if not getattr(model, "_hyena_eval_wrapper", False):
@@ -73,6 +74,7 @@ def encode_sequences(
             max_length=max_length,
             device=device,
             pooling=pooling,
+            normalize=normalize,
             desc=desc,
         )
 
@@ -106,7 +108,8 @@ def encode_sequences(
                 pooling=pooling,
                 eos_token_id=tokenizer.eos_token_id,
             )
-            pooled = F.normalize(pooled, dim=-1)
+            if normalize:
+                pooled = F.normalize(pooled, dim=-1)
 
         all_embeddings.append(pooled.cpu().float().numpy())
         del enc, out, hidden, pooled
