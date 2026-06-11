@@ -4,6 +4,7 @@ Caduceus-style frozen VEP/SNP distance-bucket probe.
 
 VEP labels describe the effect of a mutation, so the probe feature is built
 from paired reference and alternate windows:
+  - caduceus_concat: [emb_ref_snp_window; emb_alt_snp_window]
   - diff       : emb_alt - emb_ref
   - absdiff    : |emb_alt - emb_ref|
   - concat     : [emb_ref; emb_alt; |emb_alt - emb_ref|]
@@ -22,8 +23,8 @@ Example:
     --models "H0:LongSafari/hyenadna-small-32k-seqlen-hf:hyena" \
              "H1:./hyena_bidir_h1:hyena" \
     --csv ./data/vep_windows.csv \
-    --feature diff \
-    --probes linear rbf_svm \
+    --feature caduceus_concat \
+    --probes rbf_svm \
     --train-per-bucket 5000 \
     --repeats 5 \
     --output ./eval_results/vep_distance_probe.json
@@ -41,6 +42,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+from tqdm import tqdm
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(ROOT, "src")
@@ -113,6 +116,145 @@ def encode_sequences(
         denom = np.linalg.norm(emb, axis=1, keepdims=True)
         emb = emb / np.clip(denom, 1e-12, None)
     return emb.astype(np.float32, copy=False)
+
+
+def extract_hidden_states(output) -> torch.Tensor:
+    if hasattr(output, "last_hidden_state"):
+        return output.last_hidden_state
+    if hasattr(output, "hidden_states") and output.hidden_states is not None:
+        return output.hidden_states[-1]
+    if isinstance(output, tuple):
+        return output[0]
+    raise TypeError(
+        f"Unsupported model output type {type(output)!r}; expected last_hidden_state, "
+        "hidden_states, or tuple output."
+    )
+
+
+def forward_hidden(model, enc: dict[str, torch.Tensor]) -> torch.Tensor:
+    if hasattr(model, "transformer"):
+        out = model.transformer(
+            input_ids=enc["input_ids"],
+            attention_mask=enc.get("attention_mask"),
+        )
+    else:
+        kwargs = dict(
+            input_ids=enc["input_ids"],
+            attention_mask=enc.get("attention_mask"),
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        try:
+            out = model(**kwargs)
+        except TypeError:
+            kwargs.pop("output_hidden_states", None)
+            kwargs.pop("return_dict", None)
+            out = model(**kwargs)
+    return extract_hidden_states(out)
+
+
+def find_variant_token_indices(input_ids_ref: torch.Tensor, input_ids_alt: torch.Tensor, attention_mask: torch.Tensor):
+    valid_lengths = attention_mask.sum(dim=1).clamp(min=1)
+    center = (valid_lengths // 2).to(dtype=torch.long)
+    indices = []
+    for row in range(input_ids_ref.size(0)):
+        valid_len = int(valid_lengths[row].item())
+        diffs = torch.nonzero(
+            input_ids_ref[row, :valid_len] != input_ids_alt[row, :valid_len],
+            as_tuple=False,
+        ).flatten()
+        if diffs.numel():
+            idx = int(diffs[diffs.numel() // 2].item())
+        else:
+            idx = int(center[row].item())
+        indices.append(idx)
+    return torch.tensor(indices, device=input_ids_ref.device, dtype=torch.long)
+
+
+def window_mean(hidden: torch.Tensor, attention_mask: torch.Tensor, center_idx: torch.Tensor, window_tokens: int):
+    half_left = window_tokens // 2
+    half_right = window_tokens - half_left
+    pooled = []
+    for row in range(hidden.size(0)):
+        valid_len = int(attention_mask[row].sum().item())
+        center = int(center_idx[row].item())
+        start = max(0, center - half_left)
+        end = min(valid_len, center + half_right + 1)
+        if end <= start:
+            start = max(0, min(center, valid_len - 1))
+            end = start + 1
+        pooled.append(hidden[row, start:end].mean(dim=0))
+    return torch.stack(pooled, dim=0)
+
+
+def encode_variant_window_embeddings(
+    model,
+    tokenizer,
+    ref_sequences: list[str],
+    alt_sequences: list[str],
+    batch_size: int,
+    max_length: int,
+    device: str,
+    window_bp: int,
+    bp_per_token: float,
+    normalize: bool,
+    desc: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    model.eval()
+    ref_embeddings = []
+    alt_embeddings = []
+    window_tokens = max(1, int(round(window_bp / bp_per_token)))
+
+    for i in tqdm(range(0, len(ref_sequences), batch_size), desc=desc, leave=False):
+        ref_batch = ref_sequences[i : i + batch_size]
+        alt_batch = alt_sequences[i : i + batch_size]
+        with torch.inference_mode():
+            enc_ref = tokenizer(
+                ref_batch,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=max_length,
+                padding="max_length",
+                return_attention_mask=True,
+                return_tensors="pt",
+            )
+            enc_alt = tokenizer(
+                alt_batch,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=max_length,
+                padding="max_length",
+                return_attention_mask=True,
+                return_tensors="pt",
+            )
+            enc_ref = {k: v.to(device) for k, v in enc_ref.items()}
+            enc_alt = {k: v.to(device) for k, v in enc_alt.items()}
+            if "attention_mask" not in enc_ref:
+                enc_ref["attention_mask"] = torch.ones_like(enc_ref["input_ids"])
+            if "attention_mask" not in enc_alt:
+                enc_alt["attention_mask"] = torch.ones_like(enc_alt["input_ids"])
+
+            hidden_ref = forward_hidden(model, enc_ref)
+            hidden_alt = forward_hidden(model, enc_alt)
+            center_idx = find_variant_token_indices(
+                enc_ref["input_ids"],
+                enc_alt["input_ids"],
+                enc_ref["attention_mask"],
+            )
+            pooled_ref = window_mean(hidden_ref, enc_ref["attention_mask"], center_idx, window_tokens)
+            pooled_alt = window_mean(hidden_alt, enc_alt["attention_mask"], center_idx, window_tokens)
+            if normalize:
+                pooled_ref = F.normalize(pooled_ref, dim=-1)
+                pooled_alt = F.normalize(pooled_alt, dim=-1)
+
+        ref_embeddings.append(pooled_ref.cpu().float().numpy())
+        alt_embeddings.append(pooled_alt.cpu().float().numpy())
+        del enc_ref, enc_alt, hidden_ref, hidden_alt, pooled_ref, pooled_alt
+
+    return (
+        np.concatenate(ref_embeddings, axis=0).astype(np.float32, copy=False),
+        np.concatenate(alt_embeddings, axis=0).astype(np.float32, copy=False),
+    )
 
 
 def parse_bucket_edges(text: str) -> list[float]:
@@ -216,6 +358,8 @@ def make_split(
 
 def build_variant_features(ref_emb: np.ndarray, alt_emb: np.ndarray, mode: str) -> np.ndarray:
     delta = alt_emb - ref_emb
+    if mode == "caduceus_concat":
+        return np.concatenate([ref_emb, alt_emb], axis=1)
     if mode == "diff":
         return delta
     if mode == "absdiff":
@@ -225,7 +369,7 @@ def build_variant_features(ref_emb: np.ndarray, alt_emb: np.ndarray, mode: str) 
     raise ValueError(f"Unsupported feature mode {mode!r}.")
 
 
-def fit_probe(train_x, train_y, test_x, probe: str, seed: int):
+def fit_probe(train_x, train_y, test_x, probe: str, seed: int, svm_c_values: list[float], svm_val_fraction: float):
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 
@@ -235,14 +379,37 @@ def fit_probe(train_x, train_y, test_x, probe: str, seed: int):
         clf = LogisticRegression(max_iter=2000, class_weight="balanced", random_state=seed)
         pipe = make_pipeline(StandardScaler(), clf)
         pipe.fit(train_x, train_y)
-        return pipe.predict_proba(test_x)[:, 1]
+        return pipe.predict_proba(test_x)[:, 1], {}
 
     from sklearn.svm import SVC
 
-    clf = SVC(kernel="rbf", class_weight="balanced", gamma="scale", C=1.0, random_state=seed)
+    selected_c = svm_c_values[0]
+    if len(svm_c_values) > 1 and 0.0 < svm_val_fraction < 1.0:
+        rng = np.random.default_rng(seed)
+        train_y_arr = np.asarray(train_y)
+        train_indices = []
+        val_indices = []
+        for label in np.unique(train_y_arr):
+            label_idx = np.flatnonzero(train_y_arr == label)
+            rng.shuffle(label_idx)
+            n_val = max(1, int(round(label_idx.size * svm_val_fraction)))
+            val_indices.extend(label_idx[:n_val].tolist())
+            train_indices.extend(label_idx[n_val:].tolist())
+        if len(set(train_y_arr[train_indices].tolist())) >= 2 and len(set(train_y_arr[val_indices].tolist())) >= 2:
+            best_auc = -np.inf
+            for c_value in svm_c_values:
+                clf = SVC(kernel="rbf", class_weight="balanced", gamma="scale", C=c_value, random_state=seed)
+                pipe = make_pipeline(StandardScaler(), clf)
+                pipe.fit(train_x[train_indices], train_y_arr[train_indices])
+                auc = auc_or_nan(train_y_arr[val_indices], pipe.decision_function(train_x[val_indices]))
+                if np.isfinite(auc) and auc > best_auc:
+                    best_auc = auc
+                    selected_c = c_value
+
+    clf = SVC(kernel="rbf", class_weight="balanced", gamma="scale", C=selected_c, random_state=seed)
     pipe = make_pipeline(StandardScaler(), clf)
     pipe.fit(train_x, train_y)
-    return pipe.decision_function(test_x)
+    return pipe.decision_function(test_x), {"selected_c": selected_c}
 
 
 def auc_or_nan(y_true, scores) -> float:
@@ -299,8 +466,14 @@ def parse_args():
     p.add_argument("--train-per-bucket", type=int, default=5000)
     p.add_argument("--test-per-bucket", type=int, default=0, help="0 keeps all available test rows.")
     p.add_argument("--repeats", type=int, default=5)
-    p.add_argument("--feature", choices=("diff", "absdiff", "concat"), default="diff")
-    p.add_argument("--probes", nargs="+", choices=("linear", "rbf_svm"), default=["linear", "rbf_svm"])
+    p.add_argument("--feature", choices=("caduceus_concat", "diff", "absdiff", "concat"), default="caduceus_concat")
+    p.add_argument("--probes", nargs="+", choices=("linear", "rbf_svm"), default=["rbf_svm"])
+    p.add_argument("--embedding-mode", choices=("snp_window", "pooled"), default="snp_window")
+    p.add_argument("--snp-window-bp", type=int, default=1536)
+    p.add_argument("--bp-per-token", type=float, default=4.0)
+    p.add_argument("--hyena-bp-per-token", type=float, default=1.0)
+    p.add_argument("--svm-c-values", default="1,5,10")
+    p.add_argument("--svm-val-fraction", type=float, default=0.2)
     p.add_argument("--bootstrap-iters", type=int, default=1000)
     p.add_argument("--baseline-model", default=None, help="Model name for paired bootstrap deltas. Defaults to first model.")
     p.add_argument("--batch-size", type=int, default=64)
@@ -325,6 +498,9 @@ def main():
     buckets = assign_buckets(rows, edges)
     specs = [ModelSpec.parse(item) for item in args.models]
     baseline_name = args.baseline_model or specs[0].name
+    svm_c_values = [float(item.strip()) for item in args.svm_c_values.split(",") if item.strip()]
+    if not svm_c_values:
+        raise ValueError("--svm-c-values must contain at least one value.")
 
     device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
     if args.fp32 or device == "cpu":
@@ -336,7 +512,9 @@ def main():
     print(f"  Rows      : {len(rows):,}")
     print(f"  Buckets   : {', '.join(f'{k}={len(v):,}' for k, v in buckets.items())}")
     print(f"  Feature   : {args.feature}")
+    print(f"  Embedding : {args.embedding_mode}")
     print(f"  Probes    : {args.probes}")
+    print(f"  SVM C grid: {svm_c_values}")
     print(f"  Baseline  : {baseline_name}")
     print(f"  Repeats   : {args.repeats}")
     print(f"  Device    : {device}")
@@ -362,30 +540,46 @@ def main():
             batch_size = args.batch_size
         max_length = args.hyena_max_length if spec.mode == "hyena" else args.max_length
 
-        ref_embeddings = encode_sequences(
-            encode_fn,
-            model,
-            tokenizer,
-            ref_sequences,
-            batch_size,
-            max_length,
-            device,
-            args.pooling,
-            normalize=not args.no_l2_normalize,
-            desc=f"{spec.name} VEP ref windows",
-        )
-        alt_embeddings = encode_sequences(
-            encode_fn,
-            model,
-            tokenizer,
-            alt_sequences,
-            batch_size,
-            max_length,
-            device,
-            args.pooling,
-            normalize=not args.no_l2_normalize,
-            desc=f"{spec.name} VEP alt windows",
-        )
+        if args.embedding_mode == "snp_window":
+            bp_per_token = args.hyena_bp_per_token if spec.mode == "hyena" else args.bp_per_token
+            ref_embeddings, alt_embeddings = encode_variant_window_embeddings(
+                model=model,
+                tokenizer=tokenizer,
+                ref_sequences=ref_sequences,
+                alt_sequences=alt_sequences,
+                batch_size=batch_size,
+                max_length=max_length,
+                device=device,
+                window_bp=args.snp_window_bp,
+                bp_per_token=bp_per_token,
+                normalize=not args.no_l2_normalize,
+                desc=f"{spec.name} VEP SNP windows",
+            )
+        else:
+            ref_embeddings = encode_sequences(
+                encode_fn,
+                model,
+                tokenizer,
+                ref_sequences,
+                batch_size,
+                max_length,
+                device,
+                args.pooling,
+                normalize=not args.no_l2_normalize,
+                desc=f"{spec.name} VEP ref windows",
+            )
+            alt_embeddings = encode_sequences(
+                encode_fn,
+                model,
+                tokenizer,
+                alt_sequences,
+                batch_size,
+                max_length,
+                device,
+                args.pooling,
+                normalize=not args.no_l2_normalize,
+                desc=f"{spec.name} VEP alt windows",
+            )
         features = build_variant_features(ref_embeddings, alt_embeddings, args.feature)
 
         model_result = {"model": spec.__dict__, "feature_dim": int(features.shape[1]), "buckets": {}}
@@ -411,14 +605,17 @@ def main():
                     test_y = labels[test_idx]
                     if len(train_idx) < 2 or len(test_idx) < 2 or len(set(train_y.tolist())) < 2:
                         scores = np.full(len(test_idx), np.nan, dtype=np.float64)
+                        probe_meta = {}
                         auc = float("nan")
                     else:
-                        scores = fit_probe(
+                        scores, probe_meta = fit_probe(
                             features[train_idx],
                             train_y,
                             features[test_idx],
                             probe=probe,
                             seed=args.seed + repeat,
+                            svm_c_values=svm_c_values,
+                            svm_val_fraction=args.svm_val_fraction,
                         )
                         auc = auc_or_nan(test_y, scores)
                     aucs.append(auc)
@@ -429,6 +626,7 @@ def main():
                             "test_n": len(test_idx),
                             "test_indices": [int(idx) for idx in test_idx],
                             "aucroc": auc,
+                            **probe_meta,
                         }
                     )
                     score_cache[(spec.name, bucket, probe, repeat)] = {

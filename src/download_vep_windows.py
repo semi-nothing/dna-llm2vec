@@ -117,7 +117,16 @@ def main() -> None:
     with open(args.output, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["ref_sequence", "alt_sequence", "label", "distance_to_tss", "split"],
+            fieldnames=[
+                "ref_sequence",
+                "alt_sequence",
+                "label",
+                "distance_to_tss",
+                "split",
+                "tissue",
+                "chromosome",
+                "position",
+            ],
         )
         writer.writeheader()
 
@@ -138,9 +147,17 @@ def main() -> None:
                         "label": pick(row, ("labels", "label")),
                         "distance_to_tss": pick(
                             row,
-                            ("distance_to_nearest_tss", "distance_to_tss", "distance"),
+                            (
+                                "distance_to_nearest_tss",
+                                "distance_to_nearest_TSS",
+                                "distance_to_tss",
+                                "distance",
+                            ),
                         ),
                         "split": split_name,
+                        "tissue": row.get("tissue", ""),
+                        "chromosome": row.get("chromosome", ""),
+                        "position": row.get("position", ""),
                     }
                 )
                 n_rows += 1

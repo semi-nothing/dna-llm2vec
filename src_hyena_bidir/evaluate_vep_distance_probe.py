@@ -12,8 +12,8 @@ Example:
     --models "H0:LongSafari/hyenadna-small-32k-seqlen-hf:hyena" \
              "H1_bidir:./hyena_bidir_h1:hyena" \
     --csv ./data/vep_windows.csv \
-    --feature diff \
-    --probes linear rbf_svm \
+    --feature caduceus_concat \
+    --probes rbf_svm \
     --train-per-bucket 5000 \
     --repeats 5 \
     --output ./eval_results/vep_hyena_bidir_probe.json
