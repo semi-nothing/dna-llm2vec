@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import shutil
 from collections.abc import Mapping
 
 
@@ -31,7 +32,30 @@ def pick(row: Mapping, names: tuple[str, ...]):
     raise KeyError(f"None of {names} found. Available columns: {list(row.keys())}")
 
 
-def load_lrb_dataset(task_name: str | None, sequence_length: int):
+def prepare_reference_genome(reference_genome: str | None) -> None:
+    hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+    datasets_cache = os.environ.get("HF_DATASETS_CACHE", os.path.join(hf_home, "datasets"))
+    downloads_dir = os.path.join(datasets_cache, "downloads")
+    os.makedirs(downloads_dir, exist_ok=True)
+
+    if not reference_genome:
+        return
+
+    source = os.path.abspath(reference_genome)
+    if not os.path.isfile(source):
+        raise SystemExit(f"--reference-genome does not exist: {source}")
+
+    target = os.path.join(downloads_dir, "hg38.fa")
+    if os.path.exists(target):
+        return
+
+    try:
+        os.symlink(source, target)
+    except OSError:
+        shutil.copyfile(source, target)
+
+
+def load_lrb_dataset(task_name: str | None, sequence_length: int, reference_genome: str | None):
     try:
         import datasets
         from datasets import load_dataset
@@ -45,6 +69,8 @@ def load_lrb_dataset(task_name: str | None, sequence_length: int):
             "Install a 3.x release, e.g. `uv pip install 'datasets>=3.5,<4'`, "
             "then run this command again."
         )
+
+    prepare_reference_genome(reference_genome)
 
     task_names = (task_name,) if task_name else TASK_FALLBACKS
     errors = []
@@ -67,6 +93,11 @@ def parse_args():
     parser.add_argument("--output", default="./data/vep_windows.csv")
     parser.add_argument("--sequence-length", type=int, default=4096)
     parser.add_argument(
+        "--reference-genome",
+        default=None,
+        help="Optional local hg38 FASTA path, e.g. ./data/hg38.fa, to avoid re-downloading hg38.",
+    )
+    parser.add_argument(
         "--task-name",
         default=None,
         help=(
@@ -79,7 +110,7 @@ def parse_args():
 
 def main() -> None:
     args = parse_args()
-    dataset, task_name = load_lrb_dataset(args.task_name, args.sequence_length)
+    dataset, task_name = load_lrb_dataset(args.task_name, args.sequence_length, args.reference_genome)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     n_rows = 0

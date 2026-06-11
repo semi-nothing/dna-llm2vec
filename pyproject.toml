@@ -22,6 +22,7 @@ dependencies = [
     "wandb>=0.25.1",
     "scikit-learn>=1.8.0",
     "genomic-benchmarks>=1.0.0",
+    "pyfaidx>=0.8.1",
     "peft>=0.14.0",
     "einops>=0.8.2",
     "matplotlib>=3.10.9",
