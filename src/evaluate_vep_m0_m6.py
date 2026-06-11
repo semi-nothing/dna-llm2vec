@@ -14,8 +14,8 @@ explicitly to override everything.
 Example:
   uv run python src/evaluate_vep_m0_m6.py \
     --csv ./data/vep_windows.csv \
-    --feature diff \
-    --probes linear rbf_svm \
+    --feature caduceus_concat \
+    --probes rbf_svm \
     --train-per-bucket 5000 \
     --repeats 5
 """

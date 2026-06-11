@@ -4,8 +4,8 @@ DNA-LLM2Vec  |  Step 5: Fine-tuning Evaluation with LoRA
 Evaluates DNA model quality via LoRA fine-tuning + classification head,
 on the same three benchmark suites as step4 (linear probe):
 
-  GB  — Genomics Benchmarks (6 tasks). Conventional display metric: accuracy.
-  NT  — Nucleotide Transformer downstream tasks (4 tasks). Conventional display
+  GB  — Genomics Benchmarks (8 tasks). Conventional display metric: accuracy.
+  NT  — Nucleotide Transformer downstream tasks (18 tasks). Conventional display
         metric: accuracy, while F1 and MCC are also computed.
   GUE — Genome Understanding Evaluation (18 tasks). Metric: F1 (macro) + MCC.
         Matches DNABERT-2 paper convention, enabling direct comparison.
@@ -71,6 +71,8 @@ from step1_bidirectional import patch_to_bidirectional
 # ── Benchmark registries (same as step4) ─────────────────────────────────────
 
 GB_BENCHMARKS = [
+    ("demo_coding_vs_intergenomic_seqs", 2, "Coding-vs-Intergenic", "gb"),
+    ("demo_human_or_worm",               2, "Human-vs-Worm",        "gb"),
     ("human_enhancers_cohn",          2, "Enh-Cohn",      "gb"),
     ("human_enhancers_ensembl",        2, "Enh-Ensembl",   "gb"),
     ("human_ensembl_regulatory",       3, "Regulatory",    "gb"),
@@ -80,10 +82,24 @@ GB_BENCHMARKS = [
 ]
 
 NT_BENCHMARKS = [
-    ("H3K4me3",          2, "H3K4me3",    "nt"),
-    ("H3K36me3",         2, "H3K36me3",   "nt"),
-    ("H3K9ac",           2, "H3K9ac",     "nt"),
-    ("splice_sites_all", 3, "Splice-All", "nt"),
+    ("promoter_all",          2, "Promoter-All",        "nt"),
+    ("promoter_tata",         2, "Promoter-TATA",       "nt"),
+    ("promoter_no_tata",      2, "Promoter-noTATA",     "nt"),
+    ("enhancers",             2, "Enhancers",           "nt"),
+    ("enhancers_types",       3, "Enhancer-Types",      "nt"),
+    ("splice_sites_all",      3, "Splice-All",          "nt"),
+    ("splice_sites_acceptor", 2, "Splice-Acceptor",     "nt"),
+    ("splice_sites_donor",    2, "Splice-Donor",        "nt"),
+    ("H3",                    2, "H3",                  "nt"),
+    ("H4",                    2, "H4",                  "nt"),
+    ("H3K9ac",                2, "H3K9ac",              "nt"),
+    ("H3K14ac",               2, "H3K14ac",             "nt"),
+    ("H4ac",                  2, "H4ac",                "nt"),
+    ("H3K4me1",               2, "H3K4me1",             "nt"),
+    ("H3K4me2",               2, "H3K4me2",             "nt"),
+    ("H3K4me3",               2, "H3K4me3",             "nt"),
+    ("H3K36me3",              2, "H3K36me3",            "nt"),
+    ("H3K79me3",              2, "H3K79me3",            "nt"),
 ]
 
 GUE_BENCHMARKS = [

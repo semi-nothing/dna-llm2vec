@@ -50,6 +50,8 @@ RC_TABLE = str.maketrans("ACGTNacgtn", "TGCANtgcan")
 BASES = "ACGT"
 
 GB_TASKS = [
+    "demo_coding_vs_intergenomic_seqs",
+    "demo_human_or_worm",
     "human_enhancers_cohn",
     "human_enhancers_ensembl",
     "human_ensembl_regulatory",
@@ -59,10 +61,24 @@ GB_TASKS = [
 ]
 
 NT_TASKS = [
+    "promoter_all",
+    "promoter_tata",
+    "promoter_no_tata",
+    "enhancers",
+    "enhancers_types",
+    "splice_sites_all",
+    "splice_sites_acceptor",
+    "splice_sites_donor",
+    "H3",
+    "H4",
+    "H3K9ac",
+    "H3K14ac",
+    "H4ac",
+    "H3K4me1",
+    "H3K4me2",
     "H3K4me3",
     "H3K36me3",
-    "H3K9ac",
-    "splice_sites_all",
+    "H3K79me3",
 ]
 
 NT_HF_DATASET = "InstaDeepAI/nucleotide_transformer_downstream_tasks"

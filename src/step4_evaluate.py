@@ -3,13 +3,14 @@ DNA-LLM2Vec  |  Step 4: Evaluation — Genomics Benchmarks + NT + GUE Downstream
 ======================================================================================
 Evaluates DNA embeddings using a linear probe on three benchmark suites:
 
-  GB  — Genomics Benchmarks (Grevsova et al., 2023), 6 tasks.
+  GB  — Genomics Benchmarks (Grevsova et al., 2023), 8 tasks.
         Core evaluation suite; DNABERT-2 literature has published numbers.
         Loaded via the genomic-benchmarks Python package.
         Conventional display metric: accuracy.
 
   NT  — Nucleotide Transformer downstream tasks (Dalla-Torre et al., 2023),
-        4 representative tasks (H3K4me3, H3K36me3, H3K9ac, splice_sites_all).
+        18 tasks across promoter, enhancer, splice-site, and histone-mark
+        classification.
         Shows generalisation beyond GB. Loaded from HuggingFace Hub.
         Conventional display metric: accuracy, while F1 and MCC are also computed.
 
@@ -81,6 +82,8 @@ from step1_bidirectional import patch_to_bidirectional
 #   source = "gue" → loaded from leannmlindsey/GUE
 
 GB_BENCHMARKS = [
+    ("demo_coding_vs_intergenomic_seqs", 2, "Coding-vs-Intergenic", "gb"),
+    ("demo_human_or_worm",               2, "Human-vs-Worm",        "gb"),
     ("human_enhancers_cohn",          2, "Enh-Cohn",     "gb"),
     ("human_enhancers_ensembl",        2, "Enh-Ensembl",  "gb"),
     ("human_ensembl_regulatory",       3, "Regulatory",   "gb"),
@@ -89,12 +92,25 @@ GB_BENCHMARKS = [
     ("dummy_mouse_enhancers_ensembl",  2, "Mouse-Enh",   "gb"),
 ]
 
-# 4 representative NT tasks: 3 histone marks + splicing
 NT_BENCHMARKS = [
-    ("H3K4me3",          2, "H3K4me3",     "nt"),
-    ("H3K36me3",         2, "H3K36me3",    "nt"),
-    ("H3K9ac",           2, "H3K9ac",      "nt"),
-    ("splice_sites_all", 3, "Splice-All",  "nt"),
+    ("promoter_all",          2, "Promoter-All",        "nt"),
+    ("promoter_tata",         2, "Promoter-TATA",       "nt"),
+    ("promoter_no_tata",      2, "Promoter-noTATA",     "nt"),
+    ("enhancers",             2, "Enhancers",           "nt"),
+    ("enhancers_types",       3, "Enhancer-Types",      "nt"),
+    ("splice_sites_all",      3, "Splice-All",          "nt"),
+    ("splice_sites_acceptor", 2, "Splice-Acceptor",     "nt"),
+    ("splice_sites_donor",    2, "Splice-Donor",        "nt"),
+    ("H3",                    2, "H3",                  "nt"),
+    ("H4",                    2, "H4",                  "nt"),
+    ("H3K9ac",                2, "H3K9ac",              "nt"),
+    ("H3K14ac",               2, "H3K14ac",             "nt"),
+    ("H4ac",                  2, "H4ac",                "nt"),
+    ("H3K4me1",               2, "H3K4me1",             "nt"),
+    ("H3K4me2",               2, "H3K4me2",             "nt"),
+    ("H3K4me3",               2, "H3K4me3",             "nt"),
+    ("H3K36me3",              2, "H3K36me3",            "nt"),
+    ("H3K79me3",              2, "H3K79me3",            "nt"),
 ]
 
 # 18 GUE tasks — matches DNABERT-2 evaluation suite.
@@ -695,7 +711,7 @@ def parse_args():
 
     suite = p.add_mutually_exclusive_group()
     suite.add_argument("--gb-only",       action="store_true",
-                       help="Run Genomics Benchmarks only (6 GB tasks).")
+                       help="Run Genomics Benchmarks only (8 GB tasks).")
     suite.add_argument("--nt-only",       action="store_true",
                        help="Run NT representative subset only (4 NT tasks).")
     suite.add_argument("--gue-only",      action="store_true",
