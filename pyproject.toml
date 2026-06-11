@@ -12,7 +12,7 @@ dependencies = [
     "transformers>=4.51.0",
     "accelerate>=1.6.0",
     "huggingface-hub>=0.30.0",
-    "datasets>=3.5.0",
+    "datasets>=3.5.0,<4",
     "tokenizers>=0.21.0",
     # Utilities
     "numpy>=2.2.0",
