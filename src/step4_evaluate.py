@@ -148,11 +148,6 @@ ALL_BENCHMARKS = GB_BENCHMARKS + NT_BENCHMARKS + GUE_BENCHMARKS
 NT_HF_DATASET  = "InstaDeepAI/nucleotide_transformer_downstream_tasks"
 GUE_HF_DATASET = "leannmlindsey/GUE"
 
-NT_TASK_ALIASES = {
-    "splice_sites_acceptor": "splice_sites_acceptors",
-    "splice_sites_donor": "splice_sites_donors",
-}
-
 # GUE+ EPI — Enhancer-Promoter Interaction (DNABERT-2 extended benchmark)
 # 6 datasets, one per cell line, sequence length 5000 bp.
 # Source: MAGICS-LAB/DNABERT_2 GitHub (manual download required).
@@ -252,10 +247,9 @@ def _load_nt(task_key: str) -> tuple[list[str], list, list[str], list]:
         from datasets import load_dataset
         _nt_cache["ds"] = load_dataset(NT_HF_DATASET)
     ds = _nt_cache["ds"]
-    hf_task_key = NT_TASK_ALIASES.get(task_key, task_key)
 
     def _filter(split):
-        rows = ds[split].filter(lambda x: x["task"] == hf_task_key)
+        rows = ds[split].filter(lambda x: x["task"] == task_key)
         return [ex["sequence"] for ex in rows], [ex["label"] for ex in rows]
 
     train_seqs, train_labels = _filter("train")
@@ -285,8 +279,7 @@ def _validate_benchmark_splits(
     if not train_seqs or not eval_seqs:
         hint = ""
         if source == "nt":
-            hf_task_key = NT_TASK_ALIASES.get(task_key, task_key)
-            hint = f" Queried HF task='{hf_task_key}'. Check NT_TASK_ALIASES if the dataset schema changed."
+            hint = f" Queried HF task='{task_key}'. Check the dataset cache/schema if this should be nonempty."
         raise ValueError(
             f"{task_key}: loaded empty benchmark split "
             f"(train={len(train_seqs)}, {split_label}={len(eval_seqs)}).{hint}"
