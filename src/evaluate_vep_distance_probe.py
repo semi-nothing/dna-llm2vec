@@ -266,7 +266,7 @@ def parse_bucket_edges(text: str) -> list[float]:
     return edges
 
 
-def bucket_name(lo: float, hi: float) -> str:
+def bucket_name(lo: float, hi: float, open_top_threshold: float = 1e8) -> str:
     def fmt(x: float) -> str:
         if x >= 1_000_000:
             return f"{x / 1_000_000:g}Mb"
@@ -274,6 +274,12 @@ def bucket_name(lo: float, hi: float) -> str:
             return f"{x / 1_000:g}kb"
         return f"{x:g}bp"
 
+    # The final bin uses a large sentinel upper bound (e.g. 1e9) as a catch-all
+    # for "everything beyond lo". SNP-to-TSS distances never approach that, so we
+    # render it as an open-ended ">lo" instead of a misleading huge number
+    # (avoids labels like "100kb-1000Mb").
+    if hi >= open_top_threshold:
+        return f">{fmt(lo)}"
     return f"{fmt(lo)}-{fmt(hi)}"
 
 
