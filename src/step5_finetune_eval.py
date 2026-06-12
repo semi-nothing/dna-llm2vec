@@ -127,6 +127,13 @@ ALL_BENCHMARKS  = GB_BENCHMARKS + NT_BENCHMARKS + GUE_BENCHMARKS
 NT_HF_DATASET   = "InstaDeepAI/nucleotide_transformer_downstream_tasks"
 GUE_HF_DATASET  = "leannmlindsey/GUE"
 
+NT_TASK_ALIASES = {
+    # The NT HF dataset has used plural names for these tasks in some
+    # revisions/caches; keep our public result keys stable.
+    "splice_sites_acceptor": ("splice_sites_acceptors",),
+    "splice_sites_donor": ("splice_sites_donors",),
+}
+
 _nt_cache:  dict = {}
 _gue_cache: dict = {}
 _gb_root = os.environ.get("GENOMIC_BENCHMARKS_DIR", os.path.expanduser("~/.genomic_benchmarks"))
@@ -209,11 +216,18 @@ def _load_nt(task_key: str):
         from datasets import load_dataset
         _nt_cache["ds"] = load_dataset(NT_HF_DATASET)
     ds = _nt_cache["ds"]
-    def _filter(split):
-        rows = ds[split].filter(lambda x: x["task"] == task_key)
+    def _filter(split, candidate):
+        rows = ds[split].filter(lambda x: x["task"] == candidate)
         return [r["sequence"] for r in rows], [r["label"] for r in rows]
-    tr_s, tr_l = _filter("train")
-    te_s, te_l = _filter("test")
+    tr_s, tr_l = _filter("train", task_key)
+    te_s, te_l = _filter("test", task_key)
+    if (not tr_s or not te_s) and task_key in NT_TASK_ALIASES:
+        for alias in NT_TASK_ALIASES[task_key]:
+            alias_tr_s, alias_tr_l = _filter("train", alias)
+            alias_te_s, alias_te_l = _filter("test", alias)
+            if alias_tr_s and alias_te_s:
+                print(f"       [nt-alias] {task_key} -> {alias}")
+                return alias_tr_s, alias_tr_l, alias_te_s, alias_te_l
     return tr_s, tr_l, te_s, te_l
 
 

@@ -148,6 +148,13 @@ ALL_BENCHMARKS = GB_BENCHMARKS + NT_BENCHMARKS + GUE_BENCHMARKS
 NT_HF_DATASET  = "InstaDeepAI/nucleotide_transformer_downstream_tasks"
 GUE_HF_DATASET = "leannmlindsey/GUE"
 
+NT_TASK_ALIASES = {
+    # The NT HF dataset has used plural names for these tasks in some
+    # revisions/caches; keep our public result keys stable.
+    "splice_sites_acceptor": ("splice_sites_acceptors",),
+    "splice_sites_donor": ("splice_sites_donors",),
+}
+
 # GUE+ EPI — Enhancer-Promoter Interaction (DNABERT-2 extended benchmark)
 # 6 datasets, one per cell line, sequence length 5000 bp.
 # Source: MAGICS-LAB/DNABERT_2 GitHub (manual download required).
@@ -248,12 +255,19 @@ def _load_nt(task_key: str) -> tuple[list[str], list, list[str], list]:
         _nt_cache["ds"] = load_dataset(NT_HF_DATASET)
     ds = _nt_cache["ds"]
 
-    def _filter(split):
-        rows = ds[split].filter(lambda x: x["task"] == task_key)
+    def _filter(split, candidate):
+        rows = ds[split].filter(lambda x: x["task"] == candidate)
         return [ex["sequence"] for ex in rows], [ex["label"] for ex in rows]
 
-    train_seqs, train_labels = _filter("train")
-    test_seqs,  test_labels  = _filter("test")
+    train_seqs, train_labels = _filter("train", task_key)
+    test_seqs,  test_labels  = _filter("test", task_key)
+    if (not train_seqs or not test_seqs) and task_key in NT_TASK_ALIASES:
+        for alias in NT_TASK_ALIASES[task_key]:
+            alias_train_seqs, alias_train_labels = _filter("train", alias)
+            alias_test_seqs, alias_test_labels = _filter("test", alias)
+            if alias_train_seqs and alias_test_seqs:
+                print(f"       [nt-alias] {task_key} -> {alias}")
+                return alias_train_seqs, alias_train_labels, alias_test_seqs, alias_test_labels
     return train_seqs, train_labels, test_seqs, test_labels
 
 
