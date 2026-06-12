@@ -81,6 +81,11 @@ def main():
     parser.add_argument("--chroms", nargs="+", default=DEFAULT_CHROMS)
     parser.add_argument("--valid-chroms", nargs="+", default=sorted(DEFAULT_VALID_CHROMS))
     parser.add_argument("--test-chroms", nargs="+", default=[])
+    parser.add_argument(
+        "--no-valid-split",
+        action="store_true",
+        help="Assign every kept window to train, ignoring --valid-chroms and --test-chroms.",
+    )
     parser.add_argument("--max-n-fraction", type=float, default=0.0)
     parser.add_argument("--max-windows-per-chrom", type=int, default=0, help="0 means no per-chrom limit.")
     parser.add_argument("--id-prefix", default="hg38_450k")
@@ -134,7 +139,7 @@ def main():
                 if n_frac > args.max_n_fraction:
                     skipped_n += 1
                     continue
-                split = split_for_chrom(chrom, valid_chroms, test_chroms)
+                split = "train" if args.no_valid_split else split_for_chrom(chrom, valid_chroms, test_chroms)
                 row = {
                     "id": make_window_id(args.id_prefix, chrom, start, end),
                     "chrom": chrom,
@@ -153,6 +158,7 @@ def main():
 
     print(f"Output                  : {output}")
     print(f"Window bp / stride bp   : {args.window_bp:,} / {stride_bp:,}")
+    print(f"No valid/test split      : {args.no_valid_split}")
     print(f"Candidate windows       : {total:,}")
     print(f"Kept windows            : {kept:,}")
     print(f"Skipped for N fraction  : {skipped_n:,}")
