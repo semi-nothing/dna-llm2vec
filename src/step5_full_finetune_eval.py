@@ -118,6 +118,11 @@ ALL_BENCHMARKS  = GB_BENCHMARKS + NT_BENCHMARKS + GUE_BENCHMARKS
 NT_HF_DATASET   = "InstaDeepAI/nucleotide_transformer_downstream_tasks"
 GUE_HF_DATASET  = "leannmlindsey/GUE"
 
+NT_TASK_ALIASES = {
+    "splice_sites_acceptor": "splice_sites_acceptors",
+    "splice_sites_donor": "splice_sites_donors",
+}
+
 _nt_cache:  dict = {}
 _gue_cache: dict = {}
 _gb_root = os.environ.get("GENOMIC_BENCHMARKS_DIR", os.path.expanduser("~/.genomic_benchmarks"))
@@ -200,12 +205,34 @@ def _load_nt(task_key: str):
         from datasets import load_dataset
         _nt_cache["ds"] = load_dataset(NT_HF_DATASET)
     ds = _nt_cache["ds"]
+    hf_task_key = NT_TASK_ALIASES.get(task_key, task_key)
     def _filter(split):
-        rows = ds[split].filter(lambda x: x["task"] == task_key)
+        rows = ds[split].filter(lambda x: x["task"] == hf_task_key)
         return [r["sequence"] for r in rows], [r["label"] for r in rows]
     tr_s, tr_l = _filter("train")
     te_s, te_l = _filter("test")
     return tr_s, tr_l, te_s, te_l
+
+
+def _validate_benchmark_splits(task_key: str, source: str, tr_s, tr_l, te_s, te_l) -> None:
+    split_label = "dev" if source in ("gue", "gue+") else "test"
+    if len(tr_s) != len(tr_l):
+        raise ValueError(
+            f"{task_key}: train sequence/label count mismatch ({len(tr_s)} vs {len(tr_l)})"
+        )
+    if len(te_s) != len(te_l):
+        raise ValueError(
+            f"{task_key}: {split_label} sequence/label count mismatch ({len(te_s)} vs {len(te_l)})"
+        )
+    if not tr_s or not te_s:
+        hint = ""
+        if source == "nt":
+            hf_task_key = NT_TASK_ALIASES.get(task_key, task_key)
+            hint = f" Queried HF task='{hf_task_key}'. Check NT_TASK_ALIASES if the dataset schema changed."
+        raise ValueError(
+            f"{task_key}: loaded empty benchmark split "
+            f"(train={len(tr_s)}, {split_label}={len(te_s)}).{hint}"
+        )
 
 
 def _load_gue(task_key: str):
@@ -285,18 +312,24 @@ def load_benchmark_data(task_key: str, source: str,
                         gue_plus_dir: str = "", crop_bp: int = 4096,
                         crop_mode: str = "center",
                         filter_non_acgt: bool = False):
-    if source == "gb":   return _load_gb(task_key)
-    if source == "nt":   return _load_nt(task_key)
-    if source == "gue":  return _load_gue(task_key)
-    if source == "gue+":
-        return _load_gue_plus(
+    if source == "gb":
+        payload = _load_gb(task_key)
+    elif source == "nt":
+        payload = _load_nt(task_key)
+    elif source == "gue":
+        payload = _load_gue(task_key)
+    elif source == "gue+":
+        payload = _load_gue_plus(
             task_key,
             gue_plus_dir,
             crop_bp,
             crop_mode,
             filter_non_acgt,
         )
-    raise ValueError(f"Unknown source '{source}'")
+    else:
+        raise ValueError(f"Unknown source '{source}'")
+    _validate_benchmark_splits(task_key, source, *payload)
+    return payload
 
 
 # ── PyTorch Dataset ───────────────────────────────────────────────────────────

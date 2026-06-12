@@ -72,6 +72,9 @@ def encode_sequences(
     model.eval()
     all_embeddings = []
 
+    if not sequences:
+        raise ValueError(f"{desc}: no sequences to encode")
+
     for i in tqdm(range(0, len(sequences), batch_size), desc=desc, leave=False):
         batch = sequences[i : i + batch_size]
         with torch.inference_mode():

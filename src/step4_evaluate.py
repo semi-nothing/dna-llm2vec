@@ -148,6 +148,11 @@ ALL_BENCHMARKS = GB_BENCHMARKS + NT_BENCHMARKS + GUE_BENCHMARKS
 NT_HF_DATASET  = "InstaDeepAI/nucleotide_transformer_downstream_tasks"
 GUE_HF_DATASET = "leannmlindsey/GUE"
 
+NT_TASK_ALIASES = {
+    "splice_sites_acceptor": "splice_sites_acceptors",
+    "splice_sites_donor": "splice_sites_donors",
+}
+
 # GUE+ EPI — Enhancer-Promoter Interaction (DNABERT-2 extended benchmark)
 # 6 datasets, one per cell line, sequence length 5000 bp.
 # Source: MAGICS-LAB/DNABERT_2 GitHub (manual download required).
@@ -247,14 +252,45 @@ def _load_nt(task_key: str) -> tuple[list[str], list, list[str], list]:
         from datasets import load_dataset
         _nt_cache["ds"] = load_dataset(NT_HF_DATASET)
     ds = _nt_cache["ds"]
+    hf_task_key = NT_TASK_ALIASES.get(task_key, task_key)
 
     def _filter(split):
-        rows = ds[split].filter(lambda x: x["task"] == task_key)
+        rows = ds[split].filter(lambda x: x["task"] == hf_task_key)
         return [ex["sequence"] for ex in rows], [ex["label"] for ex in rows]
 
     train_seqs, train_labels = _filter("train")
     test_seqs,  test_labels  = _filter("test")
     return train_seqs, train_labels, test_seqs, test_labels
+
+
+def _validate_benchmark_splits(
+    task_key: str,
+    source: str,
+    train_seqs: list[str],
+    train_labels: list,
+    eval_seqs: list[str],
+    eval_labels: list,
+) -> None:
+    split_label = "dev" if source in ("gue", "gue+") else "test"
+    if len(train_seqs) != len(train_labels):
+        raise ValueError(
+            f"{task_key}: train sequence/label count mismatch "
+            f"({len(train_seqs)} vs {len(train_labels)})"
+        )
+    if len(eval_seqs) != len(eval_labels):
+        raise ValueError(
+            f"{task_key}: {split_label} sequence/label count mismatch "
+            f"({len(eval_seqs)} vs {len(eval_labels)})"
+        )
+    if not train_seqs or not eval_seqs:
+        hint = ""
+        if source == "nt":
+            hf_task_key = NT_TASK_ALIASES.get(task_key, task_key)
+            hint = f" Queried HF task='{hf_task_key}'. Check NT_TASK_ALIASES if the dataset schema changed."
+        raise ValueError(
+            f"{task_key}: loaded empty benchmark split "
+            f"(train={len(train_seqs)}, {split_label}={len(eval_seqs)}).{hint}"
+        )
 
 
 def _crop_sequence(seq: str, max_bp: int, mode: str = "center", anchor: int | None = None) -> str:
@@ -414,13 +450,13 @@ def load_benchmark_data(
     epi_reverse_order: bool = False,
 ) -> tuple[list[str], list, list[str], list]:
     if source == "gb":
-        return _load_gb(task_key)
+        payload = _load_gb(task_key)
     elif source == "nt":
-        return _load_nt(task_key)
+        payload = _load_nt(task_key)
     elif source == "gue":
-        return _load_gue(task_key)
+        payload = _load_gue(task_key)
     elif source == "gue+":
-        return _load_gue_plus(
+        payload = _load_gue_plus(
             task_key,
             gue_plus_dir,
             crop_bp=crop_bp,
@@ -430,6 +466,8 @@ def load_benchmark_data(
         )
     else:
         raise ValueError(f"Unknown source '{source}'")
+    _validate_benchmark_splits(task_key, source, *payload)
+    return payload
 
 
 # ── Embedding extraction ──────────────────────────────────────────────────────
@@ -498,6 +536,9 @@ def encode_sequences(
     """Pool + L2-normalise embeddings. Returns float32 array (N, D)."""
     model.eval()
     all_embeddings = []
+
+    if not sequences:
+        raise ValueError(f"{desc}: no sequences to encode")
 
     for i in tqdm(range(0, len(sequences), batch_size), desc=desc, leave=False):
         batch = sequences[i : i + batch_size]
