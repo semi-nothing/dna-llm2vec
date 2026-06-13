@@ -15,7 +15,9 @@ The script reports both linear and RBF-SVM probes by default. Linear is the
 cleaner representation-quality metric; RBF-SVM is included for closer
 comparison with Caduceus-style protocols. Distance buckets are evaluated
 separately, and paired bootstrap deltas are computed against the first model
-or --baseline-model using identical SNP test subsets.
+or --baseline-model using identical SNP test subsets. Per-sample L2
+normalisation is disabled by default so raw mean embeddings flow into the
+StandardScaler/SVM probe.
 
 This matches the Caduceus probe recipe, not necessarily the visible input
 context: current DNAGPT runs use roughly 4096 bp/1024 tokens, and short-context
@@ -513,7 +515,12 @@ def parse_args():
     p.add_argument("--max-length", type=int, default=1024)
     p.add_argument("--hyena-max-length", type=int, default=8192)
     p.add_argument("--pooling", choices=("mean", "weighted_mean", "last", "cls", "eos"), default="mean")
-    p.add_argument("--no-l2-normalize", action="store_true")
+    p.add_argument("--l2-normalize", action="store_true", help="L2-normalize each window embedding before the probe.")
+    p.add_argument(
+        "--no-l2-normalize",
+        action="store_true",
+        help="Deprecated compatibility flag; VEP embeddings are not L2-normalized by default.",
+    )
     p.add_argument("--output", default="./eval_results/vep_distance_probe.json")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--cpu", action="store_true")
@@ -523,6 +530,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.l2_normalize and args.no_l2_normalize:
+        raise ValueError("--l2-normalize and --no-l2-normalize are mutually exclusive.")
     args.train_value = args.train_value.lower()
     args.test_value = args.test_value.lower()
     rows = read_rows(args)
@@ -551,6 +560,7 @@ def main():
     print(f"  SVM C grid: {svm_c_values}")
     print(f"  Baseline  : {baseline_name}")
     print(f"  Repeats   : {args.repeats}")
+    print(f"  L2 norm   : {'yes' if args.l2_normalize else 'no'}")
     print(f"  Tissue cov: {'yes' if tissues else 'no'}")
     print(f"  Device    : {device}")
 
@@ -588,7 +598,7 @@ def main():
                 device=device,
                 window_bp=args.snp_window_bp,
                 bp_per_token=bp_per_token,
-                normalize=not args.no_l2_normalize,
+                normalize=args.l2_normalize,
                 desc=f"{spec.name} VEP SNP windows",
             )
         else:
@@ -601,7 +611,7 @@ def main():
                 max_length,
                 device,
                 args.pooling,
-                normalize=not args.no_l2_normalize,
+                normalize=args.l2_normalize,
                 desc=f"{spec.name} VEP ref windows",
             )
             alt_embeddings = encode_sequences(
@@ -613,7 +623,7 @@ def main():
                 max_length,
                 device,
                 args.pooling,
-                normalize=not args.no_l2_normalize,
+                normalize=args.l2_normalize,
                 desc=f"{spec.name} VEP alt windows",
             )
         features = build_variant_features(ref_embeddings, alt_embeddings, args.feature)
