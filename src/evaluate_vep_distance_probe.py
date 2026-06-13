@@ -8,12 +8,19 @@ from paired reference and alternate windows:
   - diff       : emb_alt - emb_ref
   - absdiff    : |emb_alt - emb_ref|
   - concat     : [emb_ref; emb_alt; |emb_alt - emb_ref|]
+By default, one-hot tissue covariates are appended when a tissue column is
+available, matching the Caduceus VEP protocol.
 
 The script reports both linear and RBF-SVM probes by default. Linear is the
 cleaner representation-quality metric; RBF-SVM is included for closer
 comparison with Caduceus-style protocols. Distance buckets are evaluated
 separately, and paired bootstrap deltas are computed against the first model
 or --baseline-model using identical SNP test subsets.
+
+This matches the Caduceus probe recipe, not necessarily the visible input
+context: current DNAGPT runs use roughly 4096 bp/1024 tokens, and short-context
+HyenaDNA runs use 8192 bp/8192 tokens unless --hyena-max-length and a
+long-context checkpoint are supplied.
 
 Input CSV columns default to:
   ref_sequence, alt_sequence, label, distance_to_tss
@@ -25,6 +32,7 @@ Example:
     --csv ./data/vep_windows.csv \
     --feature caduceus_concat \
     --probes rbf_svm \
+    --distance-bins 0,30000,100000,1000000000 \
     --train-per-bucket 5000 \
     --repeats 5 \
     --output ./eval_results/vep_distance_probe.json
@@ -179,7 +187,7 @@ def window_mean(hidden: torch.Tensor, attention_mask: torch.Tensor, center_idx: 
         valid_len = int(attention_mask[row].sum().item())
         center = int(center_idx[row].item())
         start = max(0, center - half_left)
-        end = min(valid_len, center + half_right + 1)
+        end = min(valid_len, center + half_right)
         if end <= start:
             start = max(0, min(center, valid_len - 1))
             end = start + 1
@@ -314,6 +322,7 @@ def read_rows(args) -> list[dict]:
                     "label": label,
                     "distance": distance,
                     "split": split,
+                    "tissue": (row.get(args.tissue_col, "") if args.tissue_col in fieldnames else "").strip(),
                 }
             )
     if not rows:
@@ -373,6 +382,21 @@ def build_variant_features(ref_emb: np.ndarray, alt_emb: np.ndarray, mode: str) 
     if mode == "concat":
         return np.concatenate([ref_emb, alt_emb, np.abs(delta)], axis=1)
     raise ValueError(f"Unsupported feature mode {mode!r}.")
+
+
+def build_tissue_features(rows: list[dict], enabled: bool) -> tuple[np.ndarray | None, list[str]]:
+    if not enabled:
+        return None, []
+    tissues = sorted({row["tissue"] for row in rows if row.get("tissue")})
+    if not tissues:
+        return None, []
+    tissue_to_idx = {tissue: idx for idx, tissue in enumerate(tissues)}
+    features = np.zeros((len(rows), len(tissues)), dtype=np.float32)
+    for row_idx, row in enumerate(rows):
+        tissue = row.get("tissue", "")
+        if tissue in tissue_to_idx:
+            features[row_idx, tissue_to_idx[tissue]] = 1.0
+    return features, tissues
 
 
 def fit_probe(train_x, train_y, test_x, probe: str, seed: int, svm_c_values: list[float], svm_val_fraction: float):
@@ -464,15 +488,17 @@ def parse_args():
     p.add_argument("--alt-sequence-col", default="alt_sequence")
     p.add_argument("--label-col", default="label")
     p.add_argument("--distance-col", default="distance_to_tss")
+    p.add_argument("--tissue-col", default="tissue")
     p.add_argument("--split-col", default=None, help="Optional column with train/test split labels.")
     p.add_argument("--train-value", default="train")
     p.add_argument("--test-value", default="test")
     p.add_argument("--test-fraction", type=float, default=0.2)
-    p.add_argument("--distance-bins", default="0,10000,100000,1000000000")
+    p.add_argument("--distance-bins", default="0,30000,100000,1000000000")
     p.add_argument("--train-per-bucket", type=int, default=5000)
     p.add_argument("--test-per-bucket", type=int, default=0, help="0 keeps all available test rows.")
     p.add_argument("--repeats", type=int, default=5)
     p.add_argument("--feature", choices=("caduceus_concat", "diff", "absdiff", "concat"), default="caduceus_concat")
+    p.add_argument("--no-tissue-feature", action="store_true", help="Do not append one-hot tissue covariates.")
     p.add_argument("--probes", nargs="+", choices=("linear", "rbf_svm"), default=["rbf_svm"])
     p.add_argument("--embedding-mode", choices=("snp_window", "pooled"), default="snp_window")
     p.add_argument("--snp-window-bp", type=int, default=1536)
@@ -514,6 +540,8 @@ def main():
     else:
         dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
+    tissue_features, tissues = build_tissue_features(rows, enabled=not args.no_tissue_feature)
+
     print("VEP distance-bucket frozen probe")
     print(f"  Rows      : {len(rows):,}")
     print(f"  Buckets   : {', '.join(f'{k}={len(v):,}' for k, v in buckets.items())}")
@@ -523,6 +551,7 @@ def main():
     print(f"  SVM C grid: {svm_c_values}")
     print(f"  Baseline  : {baseline_name}")
     print(f"  Repeats   : {args.repeats}")
+    print(f"  Tissue cov: {'yes' if tissues else 'no'}")
     print(f"  Device    : {device}")
 
     labels = np.array([row["label"] for row in rows], dtype=np.int64)
@@ -532,6 +561,7 @@ def main():
         "config": vars(args),
         "n_rows": len(rows),
         "bucket_counts": {name: len(indices) for name, indices in buckets.items()},
+        "tissues": tissues,
         "models": {},
         "paired_bootstrap": {},
     }
@@ -587,6 +617,8 @@ def main():
                 desc=f"{spec.name} VEP alt windows",
             )
         features = build_variant_features(ref_embeddings, alt_embeddings, args.feature)
+        if tissue_features is not None:
+            features = np.concatenate([features, tissue_features], axis=1)
 
         model_result = {"model": spec.__dict__, "feature_dim": int(features.shape[1]), "buckets": {}}
         for bucket, indices in buckets.items():
