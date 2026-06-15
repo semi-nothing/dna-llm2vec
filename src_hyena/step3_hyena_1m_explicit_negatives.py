@@ -270,28 +270,29 @@ class ExplicitNegativeCollator:
         self.local_shift = int(round(self.chunk_size * self.local_shift_ratio))
 
     def _crop_pair(self, seq: str) -> tuple[str, str]:
-        if len(seq) <= self.chunk_size:
-            crop = seq[: self.chunk_size]
-            return crop, crop
-        max_shift = min(self.crop_shift, len(seq) - self.chunk_size)
-        if max_shift <= 0:
-            crop = seq[: self.chunk_size]
-            return crop, crop
-        start_a = random.randint(0, max_shift)
-        start_b = random.randint(0, max_shift)
+        required = self.chunk_size + self.crop_shift
+        if self.crop_shift <= 0 or len(seq) < required:
+            raise ValueError(
+                "crop mode needs parent windows longer than each crop: "
+                f"len(seq)={len(seq):,}, chunk_size={self.chunk_size:,}, "
+                f"required>={required:,} for overlap_ratio={self.overlap_ratio}."
+            )
+        window_start = random.randint(0, len(seq) - required)
+        start_a = window_start + random.randint(0, self.crop_shift)
+        start_b = window_start + random.randint(0, self.crop_shift)
         return seq[start_a : start_a + self.chunk_size], seq[start_b : start_b + self.chunk_size]
 
     def _local_shift_pair(self, seq: str) -> tuple[str, str]:
-        if len(seq) <= self.chunk_size:
-            crop = seq[: self.chunk_size]
-            return crop, crop
         required = self.chunk_size + 2 * self.local_shift
         if self.local_shift <= 0 or len(seq) < required:
-            crop = seq[: self.chunk_size]
-            return crop, crop
+            raise ValueError(
+                "local_shift mode needs parent windows with shift margin: "
+                f"len(seq)={len(seq):,}, chunk_size={self.chunk_size:,}, "
+                f"required>={required:,} for local_shift_ratio={self.local_shift_ratio}."
+            )
         delta = random.randint(-self.local_shift, self.local_shift)
-        start_a = self.local_shift
-        start_b = self.local_shift + delta
+        start_a = random.randint(self.local_shift, len(seq) - self.chunk_size - self.local_shift)
+        start_b = start_a + delta
         return seq[start_a : start_a + self.chunk_size], seq[start_b : start_b + self.chunk_size]
 
     def _make_pair(self, seq: str) -> tuple[str, str]:
@@ -409,6 +410,16 @@ def build_training_args(args) -> TrainingArguments:
     return TrainingArguments(**kwargs)
 
 
+def required_parent_length(args) -> int:
+    if args.mode == "crop":
+        crop_shift = int(round(args.chunk_size * (1.0 - args.overlap_ratio)))
+        return args.chunk_size + crop_shift
+    if args.mode == "local_shift":
+        local_shift = int(round(args.chunk_size * args.local_shift_ratio))
+        return args.chunk_size + 2 * local_shift
+    return args.chunk_size
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="1M HyenaDNA Step 3 with explicit negatives")
     p.add_argument("--model", default=DEFAULT_HYENA_1M_MODEL)
@@ -468,6 +479,18 @@ def main():
         args.chunk_size = args.max_length
 
     rows_by_id = read_windows_manifest(args.windows_manifest, args.split)
+    min_required_len = required_parent_length(args)
+    short_rows = [
+        row["id"]
+        for row in rows_by_id.values()
+        if int(row.get("length") or (int(row["end"]) - int(row["start"]))) < min_required_len
+    ]
+    if short_rows:
+        raise ValueError(
+            f"{args.mode} mode with chunk_size={args.chunk_size:,} requires parent windows "
+            f">= {min_required_len:,} bp, but {len(short_rows):,} rows are shorter. "
+            f"Example: {short_rows[0]}"
+        )
     examples = read_negative_manifest(args.negative_manifest, args.split, rows_by_id)
     if args.max_train_examples > 0:
         examples = examples[: args.max_train_examples]
