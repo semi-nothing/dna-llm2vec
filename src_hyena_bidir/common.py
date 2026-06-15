@@ -47,6 +47,15 @@ def _reload_local_state_after_patch(model, model_name_or_path: str):
         return model
 
     state_dict = torch.load(state_path, map_location="cpu")
+    model_state = model.state_dict()
+    if any(k.startswith("hyena.backbone.") for k in state_dict) and not any(
+        k.startswith("hyena.backbone.") for k in model_state
+    ):
+        state_dict = {
+            k.removeprefix("hyena."): v
+            for k, v in state_dict.items()
+            if k.startswith("hyena.")
+        }
     incompatible = model.load_state_dict(state_dict, strict=False)
     missing = list(getattr(incompatible, "missing_keys", []))
     unexpected = list(getattr(incompatible, "unexpected_keys", []))
@@ -65,6 +74,20 @@ def _reload_local_state_after_patch(model, model_name_or_path: str):
     return model
 
 
+def _checkpoint_uses_causal_lm_wrapper(model_name_or_path: str) -> bool | None:
+    path = resolve_path(model_name_or_path)
+    state_path = os.path.join(path, "pytorch_model.bin") if os.path.isdir(path) else None
+    if state_path is None or not os.path.isfile(state_path):
+        return None
+
+    state_dict = torch.load(state_path, map_location="cpu")
+    if any(k.startswith("hyena.backbone.") for k in state_dict):
+        return True
+    if any(k.startswith("backbone.") for k in state_dict):
+        return False
+    return None
+
+
 def _move_and_prepare(model, model_name_or_path: str, device: str):
     model = maybe_activate_hyenadna_bidirectional(model)
     model = _reload_local_state_after_patch(model, model_name_or_path)
@@ -77,26 +100,25 @@ def _move_and_prepare(model, model_name_or_path: str, device: str):
 def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: torch.dtype = torch.float32):
     path = resolve_path(model_name_or_path)
     errors: list[str] = []
+    checkpoint_uses_causal_lm = _checkpoint_uses_causal_lm_wrapper(model_name_or_path)
+    loader_order = (
+        ("AutoModelForCausalLM", AutoModelForCausalLM),
+        ("AutoModel", AutoModel),
+    ) if checkpoint_uses_causal_lm else (
+        ("AutoModel", AutoModel),
+        ("AutoModelForCausalLM", AutoModelForCausalLM),
+    )
 
-    try:
-        model = AutoModel.from_pretrained(
-            path,
-            trust_remote_code=True,
-            dtype=dtype,
-        )
-        return _move_and_prepare(model, model_name_or_path, device), "AutoModel"
-    except Exception as e:
-        errors.append(f"AutoModel failed: {e}")
-
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            path,
-            trust_remote_code=True,
-            dtype=dtype,
-        )
-        return _move_and_prepare(model, model_name_or_path, device), "AutoModelForCausalLM"
-    except Exception as e:
-        errors.append(f"AutoModelForCausalLM failed: {e}")
+    for loader_name, loader in loader_order:
+        try:
+            model = loader.from_pretrained(
+                path,
+                trust_remote_code=True,
+                dtype=dtype,
+            )
+            return _move_and_prepare(model, model_name_or_path, device), loader_name
+        except Exception as e:
+            errors.append(f"{loader_name} failed: {e}")
 
     raise RuntimeError(
         "Could not load HyenaDNA with the current environment.\n" + "\n".join(errors)
