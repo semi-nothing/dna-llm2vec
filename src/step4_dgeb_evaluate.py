@@ -66,10 +66,13 @@ def load_hyena_common(branch: str):
     return module
 
 
-HYENA_COMMON = {
-    "standard": load_hyena_common("standard"),
-    "gated": load_hyena_common("gated"),
-}
+HYENA_COMMON_CACHE = {}
+
+
+def get_hyena_common(branch: str):
+    if branch not in HYENA_COMMON_CACHE:
+        HYENA_COMMON_CACHE[branch] = load_hyena_common(branch)
+    return HYENA_COMMON_CACHE[branch]
 
 
 RECOMMENDED_DGEB_DNA_TASKS = [
@@ -249,7 +252,7 @@ def load_dgeb_model(spec: ModelSpec, args, device: str, dtype: torch.dtype) -> F
                 f"Got --pooling {args.pooling!r} for model {spec.name!r}."
             )
         path = os.path.abspath(spec.path) if os.path.exists(spec.path) else spec.path
-        hyena_common = HYENA_COMMON[args.hyena_branch]
+        hyena_common = get_hyena_common(args.hyena_branch)
         print(f"  Loading {spec.name} ({path}, mode=hyena, branch={args.hyena_branch})")
         tokenizer = hyena_common.load_hyena_tokenizer(path)
         model, load_path = hyena_common.load_hyena_backbone(path, device=device, dtype=dtype)
