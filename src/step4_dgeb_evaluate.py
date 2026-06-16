@@ -22,6 +22,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -40,9 +41,35 @@ if SRC_DIR not in sys.path:
 HYENA_DIR = os.path.join(ROOT, "src_hyena")
 if HYENA_DIR not in sys.path:
     sys.path.insert(0, HYENA_DIR)
+HYENA_GATED_DIR = os.path.join(ROOT, "src_hyena_gated")
 
 import step4_evaluate as base  # noqa: E402
-from common import count_parameters_m, extract_hidden_states, load_hyena_backbone, load_hyena_tokenizer  # noqa: E402
+
+
+def load_hyena_common(branch: str):
+    branch_dir = HYENA_GATED_DIR if branch == "gated" else HYENA_DIR
+    if branch_dir not in sys.path:
+        sys.path.insert(0, branch_dir)
+    common_path = os.path.join(branch_dir, "common.py")
+    module_name = f"_dgeb_hyena_{branch}_common"
+    spec = importlib.util.spec_from_file_location(module_name, common_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load Hyena common module from {common_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    previous_hyena_bidirectional = sys.modules.pop("hyena_bidirectional", None)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous_hyena_bidirectional is not None:
+            sys.modules["hyena_bidirectional"] = previous_hyena_bidirectional
+    return module
+
+
+HYENA_COMMON = {
+    "standard": load_hyena_common("standard"),
+    "gated": load_hyena_common("gated"),
+}
 
 
 RECOMMENDED_DGEB_DNA_TASKS = [
@@ -102,7 +129,7 @@ def encode_hyena_sequences(
 
     from tqdm.auto import tqdm
     import torch.nn.functional as F
-    from common import ensure_attention_mask
+    hyena_common = getattr(model, "_dgeb_hyena_common")
 
     model.eval()
     embeddings = []
@@ -117,7 +144,7 @@ def encode_hyena_sequences(
                 return_tensors="pt",
             )
             enc = {k: v.to(device) for k, v in enc.items()}
-            attention_mask = ensure_attention_mask(enc, tokenizer.pad_token_id)
+            attention_mask = hyena_common.ensure_attention_mask(enc, tokenizer.pad_token_id)
 
             encoder = model.hyena if hasattr(model, "hyena") else model
             out = encoder(
@@ -126,7 +153,7 @@ def encode_hyena_sequences(
                 output_hidden_states=False,
                 return_dict=True,
             )
-            hidden = extract_hidden_states(out)
+            hidden = hyena_common.extract_hidden_states(out)
             pooled = base.pool_hidden_states(
                 hidden=hidden,
                 attention_mask=attention_mask,
@@ -222,11 +249,13 @@ def load_dgeb_model(spec: ModelSpec, args, device: str, dtype: torch.dtype) -> F
                 f"Got --pooling {args.pooling!r} for model {spec.name!r}."
             )
         path = os.path.abspath(spec.path) if os.path.exists(spec.path) else spec.path
-        print(f"  Loading {spec.name} ({path}, mode=hyena)")
-        tokenizer = load_hyena_tokenizer(path)
-        model, load_path = load_hyena_backbone(path, device=device, dtype=dtype)
+        hyena_common = HYENA_COMMON[args.hyena_branch]
+        print(f"  Loading {spec.name} ({path}, mode=hyena, branch={args.hyena_branch})")
+        tokenizer = hyena_common.load_hyena_tokenizer(path)
+        model, load_path = hyena_common.load_hyena_backbone(path, device=device, dtype=dtype)
+        model._dgeb_hyena_common = hyena_common
         print(f"    Load path  : {load_path}")
-        print(f"    Parameters : {count_parameters_m(model):.1f}M | vocab: {len(tokenizer):,}")
+        print(f"    Parameters : {hyena_common.count_parameters_m(model):.1f}M | vocab: {len(tokenizer):,}")
         return FrozenDNAEncoder(
             name=spec.name,
             model=model,
@@ -307,6 +336,12 @@ def parse_args():
     p.add_argument("--hyena-batch-size", type=int, default=None)
     p.add_argument("--max-length", type=int, default=1024, help="Max tokens for DNAGPT/generic models.")
     p.add_argument("--hyena-max-length", type=int, default=8192, help="Max tokens/bp for HyenaDNA models.")
+    p.add_argument(
+        "--hyena-branch",
+        choices=("standard", "gated"),
+        default="standard",
+        help="HyenaDNA loader branch to use for MODE=hyena models.",
+    )
     p.add_argument("--pooling", choices=("mean", "weighted_mean", "last", "cls", "eos"), default="mean")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--cpu", action="store_true")
