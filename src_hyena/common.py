@@ -265,7 +265,7 @@ def _move_and_prepare(model, device: str):
     return model
 
 
-def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: torch.dtype = torch.float32):
+def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: torch.dtype | None = torch.float32):
     """
     Conservative loader for HyenaDNA backbone models.
 
@@ -276,21 +276,19 @@ def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: tor
     errors: list[str] = []
 
     try:
-        model = AutoModel.from_pretrained(
-            path,
-            trust_remote_code=True,
-            dtype=dtype,
-        )
+        load_kwargs = {"trust_remote_code": True}
+        if dtype is not None:
+            load_kwargs["dtype"] = dtype
+        model = AutoModel.from_pretrained(path, **load_kwargs)
         return _move_and_prepare(model, device), "AutoModel"
     except Exception as e:
         errors.append(f"AutoModel failed: {e}")
 
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            path,
-            trust_remote_code=True,
-            dtype=dtype,
-        )
+        load_kwargs = {"trust_remote_code": True}
+        if dtype is not None:
+            load_kwargs["dtype"] = dtype
+        model = AutoModelForCausalLM.from_pretrained(path, **load_kwargs)
         return _move_and_prepare(model, device), "AutoModelForCausalLM"
     except Exception as e:
         errors.append(f"AutoModelForCausalLM failed: {e}")
@@ -300,13 +298,12 @@ def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: tor
     )
 
 
-def load_hyena_causal_lm(model_name_or_path: str, device: str = "cpu", dtype: torch.dtype = torch.float32):
+def load_hyena_causal_lm(model_name_or_path: str, device: str = "cpu", dtype: torch.dtype | None = torch.float32):
     path = resolve_path(model_name_or_path)
-    model = AutoModelForCausalLM.from_pretrained(
-        path,
-        trust_remote_code=True,
-        dtype=dtype,
-    )
+    load_kwargs = {"trust_remote_code": True}
+    if dtype is not None:
+        load_kwargs["dtype"] = dtype
+    model = AutoModelForCausalLM.from_pretrained(path, **load_kwargs)
     model = maybe_activate_hyenadna_bidirectional(model)
     _patch_hyena_attention_mask(model)
     model = model.to(device=device)

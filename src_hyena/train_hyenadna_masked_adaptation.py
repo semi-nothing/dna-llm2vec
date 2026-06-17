@@ -209,6 +209,14 @@ def promote_trainable_parameters_to_fp32(model: nn.Module) -> dict[str, int]:
     return counts
 
 
+def count_parameter_dtypes(model: nn.Module) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for param in model.parameters():
+        dtype_name = str(param.dtype).replace("torch.", "")
+        counts[dtype_name] = counts.get(dtype_name, 0) + param.numel()
+    return counts
+
+
 class HyenaTrainer(Trainer):
     """
     Trainer variant that avoids the default shared-tensor safetensors path.
@@ -234,7 +242,11 @@ class HyenaTrainer(Trainer):
 
 
 def build_training_args(args) -> TrainingArguments:
-    bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    bf16_ok = (
+        torch.cuda.is_available()
+        and torch.cuda.is_bf16_supported()
+        and not args.preserve_load_dtype
+    )
     eval_strategy = "steps" if args.eval_steps > 0 else "epoch"
     save_strategy = "steps" if args.save_steps > 0 else "epoch"
 
@@ -505,6 +517,14 @@ def parse_args():
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--warmup-steps", type=int, default=500)
     p.add_argument("--gradient-checkpointing", action="store_true")
+    p.add_argument(
+        "--preserve-load-dtype",
+        action="store_true",
+        help=(
+            "Omit the dtype argument when loading the model and disable Trainer bf16, "
+            "so training follows the checkpoint's stored/default parameter dtype."
+        ),
+    )
 
     p.add_argument("--logging-steps", type=int, default=50)
     p.add_argument("--save-steps", type=int, default=500)
@@ -540,7 +560,10 @@ def main():
         raise ValueError("Provide either --fasta, --sequences-file, or --smoke-test.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
+    dtype = None if args.preserve_load_dtype else (
+        torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
+    )
+    precision_label = "checkpoint/default" if dtype is None else str(dtype)
 
     print("=" * 72)
     print("HyenaDNA  |  Step 2: Span-Masked MNTP Adaptation")
@@ -548,7 +571,8 @@ def main():
     print(f"  Input model              : {args.model}")
     print(f"  Output                   : {args.output}")
     print(f"  Device                   : {device}")
-    print(f"  Precision                : {dtype}")
+    print(f"  Load/training precision  : {precision_label}")
+    print(f"  Trainer bf16             : {not args.preserve_load_dtype and torch.cuda.is_available() and torch.cuda.is_bf16_supported()}")
     print(f"  Train mode               : {args.train_mode}")
     if args.train_mode == "lora":
         print(f"  LoRA                     : r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
@@ -566,6 +590,11 @@ def main():
     tokenizer = load_hyena_tokenizer(args.model)
     base_model, load_path = load_hyena_causal_lm(args.model, device=device, dtype=dtype)
     print(f"  Load path                : {load_path}")
+    dtype_counts = count_parameter_dtypes(base_model)
+    print(
+        "  Loaded parameter dtypes  : "
+        + ", ".join(f"{k}={v/1e6:.2f}M" for k, v in sorted(dtype_counts.items()))
+    )
 
     base_model = make_hyenadna_bidirectional(base_model)
     report = inspect_hyenadna_bidirectional(base_model)

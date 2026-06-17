@@ -690,9 +690,10 @@ def load_base_model(spec: ModelSpec, device: str, dtype):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        path, torch_dtype=dtype, attn_implementation="eager",
-    )
+    load_kwargs = {"attn_implementation": "eager"}
+    if dtype is not None:
+        load_kwargs["torch_dtype"] = dtype
+    model = AutoModelForCausalLM.from_pretrained(path, **load_kwargs)
     if spec.mode == "bidir":
         model = patch_to_bidirectional(model)
 
@@ -772,6 +773,14 @@ def parse_args():
     p.add_argument("--grad-clip",    type=float, default=1.0)
     p.add_argument("--grad-ckpt",    action="store_true",
                    help="Enable gradient checkpointing to reduce activation memory.")
+    p.add_argument(
+        "--preserve-load-dtype",
+        action="store_true",
+        help=(
+            "Omit the dtype argument during model loading, preserving the checkpoint's "
+            "stored/default dtype instead of forcing bf16 on CUDA."
+        ),
+    )
     p.add_argument("--pooling", choices=("average", "last", "weighted"), default="average",
                    help="Sequence pooling used before the classification head.")
     p.add_argument("--head-type", choices=("linear", "mlp"), default="linear",
@@ -852,8 +861,10 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Full fine-tuning in fp32 is usually too memory-heavy for 1024-token EPI,
-    # so CUDA runs in bfloat16. Use --grad-ckpt if VRAM is tight.
-    dtype  = torch.bfloat16 if device == "cuda" else torch.float32
+    # so CUDA runs in bfloat16 by default. The ablation flag preserves the
+    # checkpoint/default dtype instead.
+    dtype  = None if args.preserve_load_dtype else (torch.bfloat16 if device == "cuda" else torch.float32)
+    dtype_label = "checkpoint/default" if dtype is None else str(dtype)
 
     gb_n  = sum(1 for b in active if b[3] == "gb")
     nt_n  = sum(1 for b in active if b[3] == "nt")
@@ -870,6 +881,7 @@ def main():
     print(f"  Epochs     : {args.epochs}  |  LR: {args.lr}  |  warmup_steps={args.warmup_steps}")
     print(f"  Early stop : patience={args.patience}  |  monitor={args.monitor}  |  min_delta={args.min_delta}")
     print(f"  Max length : {args.max_length}")
+    print(f"  Load dtype : {dtype_label}")
     print(f"  Seed       : {args.seed}")
     if args.repeat_index is not None:
         print(f"  Repeat     : {args.repeat_index}")

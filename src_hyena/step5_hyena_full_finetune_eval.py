@@ -219,6 +219,14 @@ def _infer_hidden_dim(model) -> int:
     raise RuntimeError("Could not infer HyenaDNA hidden dimension from config or embeddings.")
 
 
+def _parameter_dtype_summary(model) -> str:
+    counts: dict[str, int] = {}
+    for param in model.parameters():
+        dtype_name = str(param.dtype).replace("torch.", "")
+        counts[dtype_name] = counts.get(dtype_name, 0) + param.numel()
+    return ", ".join(f"{k}={v/1e6:.2f}M" for k, v in sorted(counts.items()))
+
+
 def _attach_gradient_checkpointing_enable(model) -> None:
     """Expose a HF-like gradient_checkpointing_enable method for the shared trainer."""
 
@@ -279,6 +287,7 @@ def load_base_model(spec: HyenaModelSpec, device: str, dtype):
     model.eval()
     print(f"    Load path  : {load_path}")
     print(f"    Parameters : {count_parameters_m(model):.1f}M  |  hidden: {hidden_dim}  |  vocab: {len(tokenizer):,}")
+    print(f"    Dtypes     : {_parameter_dtype_summary(model)}")
     print(
         "    Bidir patch: "
         f"{bidir_report.modules_forward_patched}/{bidir_report.total_hyena_filters} filters patched"

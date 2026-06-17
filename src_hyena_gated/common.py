@@ -94,7 +94,7 @@ def _move_and_prepare(model, model_name_or_path: str, device: str):
     return model
 
 
-def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: torch.dtype = torch.float32):
+def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: torch.dtype | None = torch.float32):
     path = resolve_path(model_name_or_path)
     errors: list[str] = []
     checkpoint_uses_causal_lm = _checkpoint_uses_causal_lm_wrapper(model_name_or_path)
@@ -108,11 +108,10 @@ def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: tor
 
     for loader_name, loader in loader_order:
         try:
-            model = loader.from_pretrained(
-                path,
-                trust_remote_code=True,
-                dtype=dtype,
-            )
+            load_kwargs = {"trust_remote_code": True}
+            if dtype is not None:
+                load_kwargs["dtype"] = dtype
+            model = loader.from_pretrained(path, **load_kwargs)
             return _move_and_prepare(model, model_name_or_path, device), loader_name
         except Exception as e:
             errors.append(f"{loader_name} failed: {e}")
@@ -122,12 +121,11 @@ def load_hyena_backbone(model_name_or_path: str, device: str = "cpu", dtype: tor
     )
 
 
-def load_hyena_causal_lm(model_name_or_path: str, device: str = "cpu", dtype: torch.dtype = torch.float32):
+def load_hyena_causal_lm(model_name_or_path: str, device: str = "cpu", dtype: torch.dtype | None = torch.float32):
     path = resolve_path(model_name_or_path)
-    model = AutoModelForCausalLM.from_pretrained(
-        path,
-        trust_remote_code=True,
-        dtype=dtype,
-    )
+    load_kwargs = {"trust_remote_code": True}
+    if dtype is not None:
+        load_kwargs["dtype"] = dtype
+    model = AutoModelForCausalLM.from_pretrained(path, **load_kwargs)
     model = _move_and_prepare(model, model_name_or_path, device)
     return model, "AutoModelForCausalLM"

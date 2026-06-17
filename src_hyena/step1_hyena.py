@@ -32,7 +32,20 @@ def parse_args():
     p.add_argument("--model", default=DEFAULT_HYENA_MODEL)
     p.add_argument("--output", default="./hyena_bidir_h1")
     p.add_argument("--max-length", type=int, default=128)
+    p.add_argument(
+        "--preserve-load-dtype",
+        action="store_true",
+        help="Omit the dtype argument during model loading, preserving the checkpoint's stored/default dtype.",
+    )
     return p.parse_args()
+
+
+def _parameter_dtype_summary(model) -> str:
+    counts: dict[str, int] = {}
+    for param in model.parameters():
+        dtype_name = str(param.dtype).replace("torch.", "")
+        counts[dtype_name] = counts.get(dtype_name, 0) + param.numel()
+    return ", ".join(f"{k}={v/1e6:.2f}M" for k, v in sorted(counts.items()))
 
 
 def _print_report(report):
@@ -54,11 +67,14 @@ def main():
     print(f"  H0 model : {args.model}")
     print(f"  H1 save  : {args.output}")
     print(f"  Device   : {device}")
+    print(f"  Load dtype : {'checkpoint/default' if args.preserve_load_dtype else 'torch.float32'}")
 
     tokenizer = load_hyena_tokenizer(args.model)
-    model, load_path = load_hyena_causal_lm(args.model, device=device)
+    dtype = None if args.preserve_load_dtype else torch.float32
+    model, load_path = load_hyena_causal_lm(args.model, device=device, dtype=dtype)
 
     print(f"  Load path                : {load_path}")
+    print(f"  Loaded parameter dtypes  : {_parameter_dtype_summary(model)}")
     print(f"  Parameters               : {count_parameters_m(model):.2f}M")
     print(f"  Trainable params         : {count_trainable_parameters_m(model):.2f}M")
     print(f"  Tokenizer vocab          : {len(tokenizer):,}")
