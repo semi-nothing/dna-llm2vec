@@ -415,6 +415,14 @@ def promote_trainable_parameters_to_fp32(model: nn.Module) -> dict[str, int]:
     return counts
 
 
+def count_parameter_dtypes(model: nn.Module) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for param in model.parameters():
+        dtype_name = str(param.dtype).replace("torch.", "")
+        counts[dtype_name] = counts.get(dtype_name, 0) + param.numel()
+    return counts
+
+
 def build_hyena_lora_config(args):
     from peft import LoraConfig
 
@@ -463,7 +471,11 @@ class HyenaContrastiveTrainer(Trainer):
 def build_training_args(args) -> TrainingArguments:
     eval_strategy = "no" if args.no_eval else ("steps" if args.eval_steps > 0 else "epoch")
     save_strategy = "steps" if args.save_steps > 0 else "epoch"
-    bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    bf16_ok = (
+        torch.cuda.is_available()
+        and torch.cuda.is_bf16_supported()
+        and not args.preserve_load_dtype
+    )
 
     kwargs = dict(
         output_dir=os.path.join(args.output, "trainer_state"),
@@ -608,6 +620,11 @@ def parse_args():
     p.add_argument("--warmup-steps", type=int, default=100)
     p.add_argument("--gradient-checkpointing", action="store_true")
     p.add_argument(
+        "--preserve-load-dtype",
+        action="store_true",
+        help="Load the checkpoint in its saved/default dtype instead of forcing bf16 on bf16-capable GPUs.",
+    )
+    p.add_argument(
         "--no-trainable-fp32",
         dest="trainable_fp32",
         action="store_false",
@@ -658,7 +675,8 @@ def hidden_path_sanity_check(args, model, tokenizer, device: str, dtype: torch.d
         base_model=model,
         proj_dim=0,
         temperature=args.temperature,
-    ).to(device=device, dtype=dtype)
+    )
+    wrapper = wrapper.to(device=device) if dtype is None else wrapper.to(device=device, dtype=dtype)
 
     with torch.inference_mode():
         old_out = model(
@@ -711,7 +729,10 @@ def main():
     np.random.seed(args.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
+    dtype = None if args.preserve_load_dtype else (
+        torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
+    )
+    precision_label = "checkpoint/default" if dtype is None else str(dtype)
     chunk_size = args.chunk_size or args.max_length * 2
     max_shift = int(round(chunk_size * (1.0 - args.overlap_ratio)))
     local_shift = int(round(chunk_size * args.local_shift_ratio))
@@ -723,7 +744,8 @@ def main():
     print(f"  Output                   : {args.output}")
     print(f"  Train mode               : {args.train_mode}")
     print(f"  Device                   : {device}")
-    print(f"  Precision                : {dtype}")
+    print(f"  Load/training precision  : {precision_label}")
+    print(f"  Trainer bf16             : {not args.preserve_load_dtype and torch.cuda.is_available() and torch.cuda.is_bf16_supported()}")
     objective_names = {
         "dropout": "dropout SimCSE",
         "revcomp": "reverse-complement SimCSE",
@@ -755,6 +777,11 @@ def main():
     tokenizer = load_hyena_tokenizer(args.model)
     base_model, load_path = load_hyena_causal_lm(args.model, device=device, dtype=dtype)
     print(f"  Load path                : {load_path}")
+    dtype_counts = count_parameter_dtypes(base_model)
+    print(
+        "  Loaded parameter dtypes  : "
+        + ", ".join(f"{k}={v/1e6:.2f}M" for k, v in sorted(dtype_counts.items()))
+    )
 
     base_model = make_hyenadna_bidirectional(base_model)
     report = inspect_hyenadna_bidirectional(base_model)
@@ -778,7 +805,8 @@ def main():
         base_model=base_model,
         proj_dim=args.proj_dim,
         temperature=args.temperature,
-    ).to(device=device, dtype=dtype)
+    )
+    model = model.to(device=device) if dtype is None else model.to(device=device, dtype=dtype)
     if args.train_mode == "lora" and args.trainable_fp32:
         before_counts = promote_trainable_parameters_to_fp32(model)
         print(
