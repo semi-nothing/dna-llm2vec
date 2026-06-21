@@ -12,6 +12,7 @@ import argparse
 import inspect
 import os
 import random
+import re
 import sys
 from typing import Optional
 
@@ -239,6 +240,56 @@ class HyenaTrainer(Trainer):
             self.processing_class.save_pretrained(output_dir)
 
         torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
+
+    def _load_best_model(self) -> None:
+        """
+        Load the best checkpoint into ``base_model`` instead of the wrapper.
+
+        ``_save`` writes ``base_model.state_dict()`` (keys have NO ``base_model.``
+        prefix). The stock ``Trainer._load_best_model`` loads into the wrapper
+        with ``strict=False``, so every key mismatches and the best model is
+        silently dropped -- training would end on the *last* step rather than the
+        best-eval one. Loading into ``base_model`` makes the keys line up.
+        """
+        best_ckpt = getattr(self.state, "best_model_checkpoint", None)
+        best_path = os.path.join(best_ckpt, "pytorch_model.bin") if best_ckpt else None
+        model = self.model
+        if (
+            best_path is None
+            or not os.path.isfile(best_path)
+            or getattr(self, "is_deepspeed_enabled", False)
+            or getattr(self, "is_fsdp_enabled", False)
+            or not hasattr(model, "base_model")
+        ):
+            # Nothing we can special-case (no file, sharded, or not our wrapper):
+            # defer to the stock implementation.
+            return super()._load_best_model()
+
+        target = model.base_model
+        state_dict = torch.load(best_path, map_location="cpu", weights_only=True)
+        load_result = target.load_state_dict(state_dict, strict=False)
+        missing = list(getattr(load_result, "missing_keys", []))
+        unexpected = list(getattr(load_result, "unexpected_keys", []))
+        ignore_patterns = list(
+            getattr(getattr(target, "config", None), "_keys_to_ignore_on_load_missing", None) or []
+        )
+        critical = [
+            k
+            for k in missing
+            if "direction_projection" not in k
+            and not any(re.search(pattern, k) for pattern in ignore_patterns)
+        ]
+        print(
+            "  Best-model reload        : "
+            f"{best_ckpt} (score={self.state.best_metric}, "
+            f"missing={len(missing)}, unexpected={len(unexpected)})"
+        )
+        if critical:
+            raise RuntimeError(
+                "Best-model reload failed to restore trained weights "
+                f"({len(critical)} keys), e.g. {critical[:8]}. "
+                "Refusing to finish training with the wrong weights."
+            )
 
 
 def build_training_args(args) -> TrainingArguments:

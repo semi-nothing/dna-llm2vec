@@ -439,9 +439,13 @@ def main():
 
     best_valid = -float("inf")
     global_step = 0
-    model.train()
     optimizer.zero_grad(set_to_none=True)
     for epoch in range(args.epochs):
+        model.train()
+        if not args.full_finetune:
+            # Frozen linear probe: keep the backbone in eval mode so its
+            # dropout does not perturb the (frozen) features during head training.
+            model.backbone.eval()
         progress = tqdm(train_loader, desc=f"epoch {epoch + 1}/{args.epochs}")
         for step, batch in enumerate(progress, start=1):
             input_ids = batch["input_ids"].to(device)

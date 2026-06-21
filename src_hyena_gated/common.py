@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 
 import torch
 from transformers import AutoModel, AutoModelForCausalLM
@@ -68,6 +69,28 @@ def _reload_local_state_after_patch(model, model_name_or_path: str):
         print(f"  Projected-bidir missing sample: {projection_missing[:3]}")
     if projection_unexpected:
         print(f"  Projected-bidir unexpected sample: {projection_unexpected[:3]}")
+
+    # Fail loud if any *trained* weight failed to load. The freshly attached
+    # direction projections are allowed to be missing (first patch falls back to
+    # the 0.5/0.5 average init); so are the model's documented ignore-on-load
+    # buffers (e.g. Sin.freq). Anything else missing means the checkpoint
+    # silently did not restore real weights -> abort instead of degrading.
+    ignore_patterns = list(
+        getattr(getattr(model, "config", None), "_keys_to_ignore_on_load_missing", None) or []
+    )
+
+    def _is_allowed_missing(key: str) -> bool:
+        if "direction_projection" in key:
+            return True
+        return any(re.search(pattern, key) for pattern in ignore_patterns)
+
+    critical_missing = [k for k in missing if not _is_allowed_missing(k)]
+    if critical_missing:
+        raise RuntimeError(
+            "Projected-bidir reload failed to restore trained weights "
+            f"({len(critical_missing)} keys), e.g. {critical_missing[:8]}. "
+            "Aborting instead of running with partially-initialized weights."
+        )
     return model
 
 
