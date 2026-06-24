@@ -78,6 +78,14 @@ def _load_wrapper(name: str):
         import step4_hyena_evaluate as wrapper
 
         return wrapper.load_model
+    if name == "hyena_gated":
+        root = os.path.dirname(os.path.dirname(__file__))
+        hyena_src = os.path.join(root, "src_hyena_gated")
+        if hyena_src not in sys.path:
+            sys.path.insert(0, hyena_src)
+        import step4_hyena_evaluate as wrapper
+
+        return wrapper.load_model
     raise ValueError(f"Unknown loader {name!r}")
 
 
@@ -400,7 +408,7 @@ def parse_args():
     p.add_argument("--model", required=True, help="Model spec: name:path:mode")
     p.add_argument(
         "--loader",
-        choices=("generic", "dnagpt", "maskedlm", "dnabert2", "caduceus", "evo", "hyena"),
+        choices=("generic", "dnagpt", "maskedlm", "dnabert2", "caduceus", "evo", "hyena", "hyena_gated"),
         default="generic",
         help="Optional Step4 wrapper loader for fragile remote-code models.",
     )

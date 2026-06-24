@@ -401,7 +401,7 @@ def parse_args():
     p.add_argument("--model", required=True, help="Model spec: name:path:mode")
     p.add_argument(
         "--loader",
-        choices=("generic", "dnagpt", "maskedlm", "dnabert2", "caduceus", "evo", "hyena"),
+        choices=("generic", "dnagpt", "maskedlm", "dnabert2", "caduceus", "evo", "hyena", "hyena_gated"),
         default="generic",
     )
     src = p.add_mutually_exclusive_group(required=True)
