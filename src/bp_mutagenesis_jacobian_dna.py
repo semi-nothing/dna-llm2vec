@@ -442,6 +442,24 @@ def output_prefix_for_fasta(base_prefix: str, fasta_path: str, model_name: str, 
     return f"{base_prefix}_{stem}"
 
 
+def print_model_dtype(model, requested_dtype: torch.dtype) -> None:
+    for param in model.parameters():
+        if torch.is_floating_point(param):
+            print(
+                "Model dtype check:",
+                f"requested={requested_dtype}",
+                f"first_floating_parameter={param.dtype}",
+                f"device={param.device}",
+                flush=True,
+            )
+            return
+    print(
+        "WARNING: Model dtype check could not find a floating-point parameter.",
+        f"requested={requested_dtype}",
+        flush=True,
+    )
+
+
 def run_one(args, sequence: str, model, tokenizer, spec, device: str, source_meta: dict | None = None, suffix: str = ""):
     alphabet = tuple(base.upper() for base in args.alphabet)
     positions = mutable_bp_positions(sequence, alphabet)
@@ -683,6 +701,7 @@ def main():
     dtype = torch.float32 if args.fp32 or device == "cpu" else torch.bfloat16
     spec = step4.ModelSpec.parse(args.model)
     model, tokenizer = _load_wrapper(args.loader)(spec, device, dtype)
+    print_model_dtype(model, dtype)
     ensure_padding(tokenizer)
 
     if args.fasta is not None and len(args.fasta) > 1:
