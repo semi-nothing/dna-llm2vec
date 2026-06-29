@@ -229,7 +229,7 @@ def plot_ablation_story(aggregate_rows: list[dict[str, str]], group_rows: list[d
         delta = chain_z[idx] - chain_z[idx - 1]
         y_mid = (chain_z[idx] + chain_z[idx - 1]) / 2
         axes[0].annotate(
-            f"+{delta:.1f}",
+            f"{delta:+.1f}",
             xy=(idx - 0.5, y_mid),
             xytext=(0, 8),
             textcoords="offset points",
